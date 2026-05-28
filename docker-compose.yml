@@ -1,0 +1,42 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sibylla-backend
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./data:/app/data
+      - ./config:/app/config
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=sqlite:////app/data/sibylla.db
+      - DB_PATH=/app/data/sibylla.db
+      - CONFIG_PATH=/app/config/settings.json
+      # Weather-only runtime: no sports, politics, economics, odds, FRED,
+      # or Congress keys are required.
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: sibylla-frontend
+    ports:
+      - "127.0.0.1:5173:5173"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    environment:
+      - VITE_API_URL=http://localhost:8000
+      - VITE_API_PROXY_TARGET=http://backend:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
