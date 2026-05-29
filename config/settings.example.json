@@ -10,7 +10,7 @@
   "paper_learning_min_side_edge": 0.03,
   "paper_learning_min_confidence": 0.25,
   "paper_learning_max_contracts": 3,
-  "paper_learning_explore_enabled": true,
+  "paper_learning_explore_enabled": false,
   "paper_learning_explore_max_per_scan": 3,
   "paper_learning_explore_max_open": 30,
   "automation_enabled": true,

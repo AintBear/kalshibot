@@ -696,6 +696,19 @@ class TestAutoEntryExecutionGates(unittest.TestCase):
             (ticker, ticker, raw),
         )
 
+    def test_automation_cycle_skips_when_already_running(self):
+        from app.services import auto_entry
+
+        self.assertTrue(auto_entry._automation_lock.acquire(blocking=False))
+        try:
+            result = auto_entry.run_automation_cycle(settings_override=self._settings())
+        finally:
+            auto_entry._automation_lock.release()
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["total_entered"], 0)
+        self.assertIn("already running", result["reason"])
+
     def test_auto_entry_respects_max_open_paper_trades_for_learning(self):
         conn = sqlite3.connect(self.db_path)
         for i in range(20):

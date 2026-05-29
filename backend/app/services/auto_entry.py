@@ -13,40 +13,51 @@ settlement CLV, prediction accuracy, and segment quality.
 """
 import json
 import logging
+import threading
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+_automation_lock = threading.Lock()
 
 
 def run_automation_cycle(settings_override: Optional[dict] = None) -> dict:
     """Run the full unattended maintenance cycle before attempting entries."""
-    lifecycle_result = {}
-    backfill_result = {}
-    rebuilt_segments = 0
-
+    if not _automation_lock.acquire(blocking=False):
+        return {
+            "skipped": True,
+            "reason": "automation cycle already running",
+            "total_entered": 0,
+        }
     try:
-        from app.services.trade_lifecycle import check_and_close_trades, backfill_settlements
-        check_and_close_trades()
-        lifecycle_result = {"ran": True}
-        backfill_result = backfill_settlements()
-    except Exception as exc:
-        lifecycle_result = {"ran": False, "error": str(exc)}
-        logger.warning("Automation lifecycle refresh failed: %s", exc)
+        lifecycle_result = {}
+        backfill_result = {}
+        rebuilt_segments = 0
 
-    try:
-        from app.services import adaptive_policy
-        rebuilt_segments = len(adaptive_policy.rebuild_snapshots())
-    except Exception as exc:
-        logger.warning("Automation learning rebuild failed: %s", exc)
+        try:
+            from app.services.trade_lifecycle import check_and_close_trades, backfill_settlements
+            check_and_close_trades()
+            lifecycle_result = {"ran": True}
+            backfill_result = backfill_settlements()
+        except Exception as exc:
+            lifecycle_result = {"ran": False, "error": str(exc)}
+            logger.warning("Automation lifecycle refresh failed: %s", exc)
 
-    entry_result = auto_enter_qualifying_alerts(settings_override=settings_override)
-    return {
-        "lifecycle": lifecycle_result,
-        "backfill": backfill_result,
-        "segments_rebuilt": rebuilt_segments,
-        "entry": entry_result,
-        "total_entered": int(entry_result.get("total_entered") or 0),
-    }
+        try:
+            from app.services import adaptive_policy
+            rebuilt_segments = len(adaptive_policy.rebuild_snapshots())
+        except Exception as exc:
+            logger.warning("Automation learning rebuild failed: %s", exc)
+
+        entry_result = auto_enter_qualifying_alerts(settings_override=settings_override)
+        return {
+            "lifecycle": lifecycle_result,
+            "backfill": backfill_result,
+            "segments_rebuilt": rebuilt_segments,
+            "entry": entry_result,
+            "total_entered": int(entry_result.get("total_entered") or 0),
+        }
+    finally:
+        _automation_lock.release()
 
 
 def paper_auto_blocker(brain: dict, settings: Optional[dict] = None) -> str:

@@ -1,27 +1,30 @@
 # KalshiBot - Project Instructions
 
-## Bot Status (updated 2026-05-29, session 11 — verified from DB/runtime)
+## Bot Status (updated 2026-05-29, session 12 — verified from DB/runtime)
 
-**Overall realized P&L: -$76.36** on 567 real `market_closed` settlements | **Strategy zone P&L: +$25.61** on 256 NO 20-40c bracket trades (blocked cities + explore excluded) | **60 open paper trades** (30 strategy, 30 explore) | **Brain score: 71**
+**Overall realized P&L: -$76.36** on 567 real `market_closed` settlements | **Strategy zone P&L: +$25.61** on 256 NO 20-40c bracket trades (blocked cities + explore excluded) | **80 open paper trades** (50 strategy, 30 legacy explore) | **Brain score: 71**
 
 ### What's actually true
 
-- The bot is running and entering paper trades again after the session-11 calibration guard and fresh scan. Latest scan processed 539/539 markets, created 69 alerts, and opened 30 strategy-zone paper trades plus the final explore trade up to the 30-open explore cap.
+- The bot is running from `/Users/AintBear/Projects/kalshibot` with a launchd watchdog installed. Latest verified scan processed 539/539 markets with 0 series errors. Watchdog last exit code was 0 and live auto remains off.
+- New paper entries are strict-strategy only. `paper_learning_explore_enabled` is now false in the local runtime and in `config/settings.example.json`; the 30 open explore trades are legacy held-out diagnostics and should not affect strategy learning.
 - The "77.1% strategy accuracy" figure carried forward across sessions 7/8/9 was a **retroactive** simulation — it filtered historical trades by what *would* have been allowed under the new blocker rules. Forward validation on those rules never happened because the bot stopped trading right after they shipped.
 - Real DB numbers (excluding `paper_reset`, `bulk_cleanup`, and explore from strategy stats): 567 market-closed settlements, -$76.36 realized P&L overall. The code-aligned strategy zone (NO 20-40c bracket trades, blocked cities removed including KXLOWTDEN, non-threshold) is the only consistently profitable slice: 256 trades, 76.2% accuracy, +$25.61 P&L.
 
 ### What changed this session
 
-Session 10 added **explore-mode learning** (`paper_learning_explore_enabled`, default 3 trades/run): the bot takes 1-contract paper bets on candidates blocked by *soft* blockers — threshold markets, NO 40c+, blocked city+segment, bracket within 1° of forecast — while still respecting the **iron-law blockers** (YES at all, NO sub-20c, NO 85c+). Session 11 capped explore at 30 open trades and excluded explore outcomes from strategy learning until reviewed.
+Session 10 added **explore-mode learning** (`paper_learning_explore_enabled`, initially 3 trades/run): the bot takes 1-contract paper bets on candidates blocked by *soft* blockers — threshold markets, NO 40c+, blocked city+segment, bracket within 1° of forecast — while still respecting the **iron-law blockers** (YES at all, NO sub-20c, NO 85c+). Session 11 capped explore at 30 open trades and excluded explore outcomes from strategy learning until reviewed. Session 12 disabled new explore entries so the active bot runs the strict strategy only.
 
 Session 11 also stopped the dynamic isotonic rebuild from overwriting identity calibration with the current concentrated bucket data. The running backend had been rebuilding 8 non-monotonic/sparse knots, which pushed many raw 0.08-0.12 probabilities to about 0.37 and helped create an overwhelmingly YES alert universe. Startup now leaves isotonic at identity until coverage is broad enough.
+
+Session 12 added a macOS launchd watchdog. It starts Docker Compose if down, restarts backend on failed health, triggers a scan if stale/missing, and pokes paper auto-entry only when paper auto is enabled and ready. It never enables live trading.
 
 | Gate                        | Current (verified)         | Target     | Status |
 |-----------------------------|----------------------------|------------|--------|
 | Strategy zone win rate      | 76.2% (256 settlements)    | >= 70%     | PASS   |
 | Strategy zone P&L           | +$25.61                    | >= $0      | PASS   |
 | Overall realized P&L        | -$76.36 (567 settlements)  | >= $0      | FAIL   |
-| Bot entering new trades     | yes (30 strategy + 30 explore open) | yes | PASS |
+| Bot entering new trades     | yes (50 strategy + 30 legacy explore open; new explore disabled) | yes | PASS |
 | Brain trust score           | 71                         | >= 90      | FAIL   |
 | Kalshi credentials          | configured                 | configured | PASS   |
 | Auto-eligible segments      | 5 (paper)                  | >= 1       | PASS   |
@@ -31,13 +34,21 @@ Session 11 also stopped the dynamic isotonic rebuild from overwriting identity c
 
 Each session, do exactly two things from this priority list (top = highest impact):
 
-1. **Forward-validate open strategy and explore trades separately** — 30 strict strategy trades and 30 explore trades are now open. Wait for settlement before relaxing blockers or increasing explore.
+1. **Forward-validate open strategy and legacy explore trades separately** — 50 strategy trades and 30 legacy explore trades are now open. Wait for settlement before relaxing blockers or re-enabling explore.
 2. **Keep isotonic conservative** — current clean data has 564 usable bucketed samples but 82.8% sit in one 0.1 bucket, so identity is safer than a global correction. Revisit only after broader raw-probability coverage.
 3. **Inspect calibration by market slice, not global only** — the strategy zone is true YES 25.4% against avg market 29.9%, while the global traded sample is true YES 37.4%. A global calibration can erase the edge.
-4. **Review `paper_learning_explore_max_open` after settlements** — default is now 30 open explore trades. Increase only if the first settled explore cohort is clean.
+4. **Keep strict mode on unless explore proves useful** — `paper_learning_explore_enabled=false` now. Re-enable only if the current 30 held-out explore trades settle cleanly.
 5. **Infrastructure** — Tests, monitoring, deployment reliability.
 
 After each session, update the status table above and note what changed.
+
+## What Was Done (2026-05-29, session 12 — Codex)
+
+- **Installed a local watchdog outside macOS protected folders.** LaunchAgent failed from `~/Downloads` with exit code 126 / `Operation not permitted`, so runtime was copied to `/Users/AintBear/Projects/kalshibot` and the LaunchAgent now points there. `launchctl` shows last exit code 0.
+- **Added `scripts/watchdog.sh` and `scripts/install-watchdog-launchd.sh`.** The watchdog runs every 5 minutes, starts Compose, restarts backend on failed `/health`, handles stale/stuck scans, and calls `/api/auto-trade/run` for paper only after a completed scan when backend readiness says it is safe. It does not enable live trading.
+- **Prevented overlapping automation cycles.** `auto_entry.run_automation_cycle()` now uses a process-local nonblocking lock and returns a skipped result if another cycle is already running.
+- **Made strict mode the active runtime posture.** `paper_learning_explore_enabled=false` in local settings and the example settings. The backend settings API now allows explore toggles so Claude/UI can expose them cleanly later. Existing explore trades remain tagged and held out from strategy learning.
+- **Verified.** Backend health OK, scan status complete 539/539 with 0 series errors, auto status paper-ready/live-off, watchdog run completed with 0 new entries because no eligible strict candidates remained, and backend tests passed (`108 passed`).
 
 ## What Was Done (2026-05-29, session 10)
 
