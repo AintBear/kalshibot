@@ -1233,11 +1233,11 @@ def _estimate_model_prob(
     hours = _hours_to_close(ticker, market)
 
     if "HIGH" in t and high is not None:
-        sigma = _adaptive_sigma(3.5, hours, forecast)
+        sigma = _adaptive_sigma(9.0, hours, forecast)
         return _temp_market_prob(high, ticker, market, sigma=sigma)
 
     if "LOW" in t and low is not None:
-        sigma = _adaptive_sigma(3.0, hours, forecast)
+        sigma = _adaptive_sigma(8.0, hours, forecast)
         return _temp_market_prob(low, ticker, market, sigma=sigma)
 
     return None

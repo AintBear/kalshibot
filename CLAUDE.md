@@ -1,6 +1,6 @@
 # KalshiBot - Project Instructions
 
-## Bot Status (updated 2026-05-28, session 8)
+## Bot Status (updated 2026-05-29, session 9)
 
 **Prediction Accuracy: 77.1% (strategy, pre-session-8)** | **Paper P&L: -$225.03 overall** | **0 open trades** | **566 real settlements**
 
@@ -40,6 +40,19 @@ Each session, do exactly two things from this priority list (top = highest impac
 5. **Infrastructure** — Tests, monitoring, deployment reliability.
 
 After each session, update the status table above and note what changed.
+
+## What Was Done (2026-05-29, session 9)
+
+- **Root-caused second outage in 24h**: Colima VirtioFS on macOS 26 (Tahoe beta) lost inode handles on the `/app/data` bind mount — `open('/app/data/sibylla.db')` returned EPERM while `stat()` succeeded and new file creation worked. Same class of bug as session 8's DNS freeze, different layer. `colima stop && colima start && docker compose up -d` restored DB access. 320+ "unable to open database file" errors had been silently accumulating for ~24h.
+- **Fixed health-check masking** (`backend/app/routers/health.py`): endpoint returned HTTP 200 even when `issues=["database_unavailable"]`, so Docker's `curl -f` healthcheck reported "healthy" through the entire outage. Now returns 503 when issues list is non-empty. This is what made the session 8 + session 9 outages invisible.
+- **Removed `--reload` from production** (`backend/Dockerfile:14`): WatchFiles reloader was spawning spurious restarts on virtiofs inotify noise. Kept stock uvicorn command.
+- **Wired up INFO-level logging** (`backend/app/main.py`): added `logging.basicConfig(level=logging.INFO)` so scheduler `logger.info()` calls actually surface in `docker logs`. Previously only `logger.error()` was visible.
+- **Made `_automation_enabled()` failures loud** (`backend/app/services/scheduler.py:25-31`): was swallowing all config-load exceptions and silently returning False, causing scans to skip with zero log output. Now logs at ERROR before returning.
+- **Reverted sigma regression** (`backend/app/services/weather_model.py:1236,1240`): HIGH 3.5→9.0, LOW 3.0→8.0. The initial git commit shipped the regressed values; CLAUDE.md sessions 2 and 6 had documented the correct 9.0/8.0 but the working tree was never pushed until session 8 created the initial commit. Effective sigma now back to documented 6.3–9.9 (HIGH) and 5.6–8.8 (LOW).
+- **Settled stuck trade 2485** (KXHIGHTPHX-26MAY28-B95.5): YES, entry 0.08, settled NO, -$0.08. Was stuck because DB was unreachable; cleared automatically by startup settlement job after the Colima restart.
+- **Switched backend restart policy** (`docker-compose.yml`): `unless-stopped` → `on-failure:3`. Combined with the 503 health fix, this enables fail-fast on future virtiofs corruption.
+- **Secrets audit: CLEAN**. `git log -p` across all secret paths returns 0 lines. `settings.json`, `*.pem`, `.env`, `data/`, `.claude/`, HANDOFF/CODEX files all correctly gitignored from the first commit. README endorses CLAUDE.md publicly on purpose — left as-is.
+- **All 101 tests still pass**.
 
 ## What Was Done (2026-05-28, session 8)
 

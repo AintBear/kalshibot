@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
 router = APIRouter()
 
@@ -13,7 +14,9 @@ def health():
         conn.close()
     except Exception:
         issues.append("database_unavailable")
-    return {
+    body = {
         "status": "degraded" if issues else "ok",
         "issues": issues,
     }
+    status_code = 503 if issues else 200
+    return JSONResponse(content=body, status_code=status_code)

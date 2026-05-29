@@ -26,7 +26,8 @@ def _automation_enabled() -> bool:
     try:
         from app import config as cfg
         return bool(cfg.load().get("automation_enabled", False))
-    except Exception:
+    except Exception as e:
+        logger.error("_automation_enabled: config load failed, disabling automation: %s", e)
         return False
 
 
