@@ -168,21 +168,34 @@ def auto_enter_qualifying_alerts(settings_override: Optional[dict] = None) -> di
     paper_max_per_event = 0
     paper_min_ev = 0.0
     paper_min_side_edge = 0.0
+    explore_open_count = 0
+    explore_open_cap = 0
     open_event_counts = {}
     if is_paper:
         unlimited_paper = _paper_unlimited_learning(settings)
         open_count = conn.execute(
             "SELECT COUNT(*) FROM trades WHERE status='open' AND paper=1"
         ).fetchone()[0]
+        explore_open_count = _open_explore_trade_count(conn)
         paper_entry_limit = _setting_int(settings, "paper_learning_max_entries_per_scan", 0, 0, 1000)
         paper_max_per_event = _setting_int(settings, "paper_learning_max_open_per_event", 0, 0, 100)
         paper_min_ev = _setting_float(settings, "paper_learning_min_ev", 0.0, 0.0, 0.50)
         paper_min_side_edge = _setting_float(settings, "paper_learning_min_side_edge", 0.0, 0.0, 0.50)
+        open_cap = _setting_int(settings, "max_open_paper_trades", 50, 1, 1000)
+        explore_open_cap = _setting_int(
+            settings,
+            "paper_learning_explore_max_open",
+            min(open_cap, 30),
+            1,
+            open_cap,
+        )
         slots_remaining = None if unlimited_paper or paper_entry_limit <= 0 else paper_entry_limit
         open_event_counts = _open_trade_event_counts(conn, paper_only=True)
         logger.info(
-            "Paper adaptive learning enabled; open=%d, max_entries=%d, max_open_per_event=%d",
+            "Paper adaptive learning enabled; open=%d, explore_open=%d/%d, max_entries=%d, max_open_per_event=%d",
             open_count,
+            explore_open_count,
+            explore_open_cap,
             paper_entry_limit,
             paper_max_per_event,
         )
@@ -314,21 +327,11 @@ def auto_enter_qualifying_alerts(settings_override: Optional[dict] = None) -> di
                 **recommendation_exit_args(rec, stop_loss_pct, take_profit_pct),
             )
 
-            # Mark alert as paper_traded
-            conn3 = get_conn()
-            conn3.execute(
-                """UPDATE alerts
-                      SET status='paper_traded',
-                          details=json_set(coalesce(details,'{}'), '$.auto_entry_action', ?),
-                          updated_at=datetime('now')
-                    WHERE id=?""",
-                ("auto_paper" if is_paper else "auto_live", alert_id),
-            )
-            conn3.commit()
-            conn3.close()
+            _mark_alert_traded(alert_id, is_paper, rec.get("learning_mode"))
 
-            logger.info("Auto-entry: %s %s x%d @ %.3f (trade_id=%s)",
-                        direction, ticker, contracts, entry_price, result.get("trade_id"))
+            logger.info("Auto-entry: %s %s x%d @ %.3f (trade_id=%s)%s",
+                        direction, ticker, contracts, entry_price, result.get("trade_id"),
+                        " [explore]" if rec.get("learning_mode") == "explore" else "")
             entered.append({"alert_id": alert_id, "ticker": ticker, "paper": is_paper, **result})
             open_trade_tickers.add(ticker)
             if is_paper:
@@ -338,6 +341,28 @@ def auto_enter_qualifying_alerts(settings_override: Optional[dict] = None) -> di
             logger.error("Auto-entry failed for alert %d (%s): %s", alert_id, ticker, exc)
             errors.append({"alert_id": alert_id, "ticker": ticker, "error": str(exc)})
 
+    explore_entered = 0
+    explore_quota = 0
+    if is_paper and bool(settings.get("paper_learning_explore_enabled", False)):
+        explore_quota = _setting_int(settings, "paper_learning_explore_max_per_scan", 3, 0, 20)
+        if explore_open_cap > 0:
+            explore_quota = max(0, min(explore_quota, explore_open_cap - explore_open_count))
+        if explore_quota > 0:
+            already = {c["row"]["id"] for c in candidates}
+            explore_entered = _run_explore_pass(
+                rows=rows,
+                already_entered_alert_ids=already.union({e["alert_id"] for e in entered}),
+                open_trade_tickers=open_trade_tickers,
+                open_trade_events=open_trade_events,
+                open_event_counts=run_event_counts,
+                paper_max_per_event=paper_max_per_event,
+                settings=settings,
+                brain=brain,
+                quota=explore_quota,
+                entered=entered,
+                errors=errors,
+            )
+
     return {
         "entered": entered,
         "errors": errors,
@@ -346,6 +371,10 @@ def auto_enter_qualifying_alerts(settings_override: Optional[dict] = None) -> di
         "total_entered": len(entered),
         "candidates_considered": considered,
         "eligible_candidates": len(candidates),
+        "explore_quota": explore_quota,
+        "explore_entered": explore_entered,
+        "explore_open_count": explore_open_count + explore_entered,
+        "explore_open_cap": explore_open_cap if is_paper else None,
         "paper_learning_mode": "adaptive_sampler" if is_paper else None,
         "paper_entry_limit": paper_entry_limit if is_paper else None,
         "paper_max_open_per_event": paper_max_per_event if is_paper else None,
@@ -354,9 +383,159 @@ def auto_enter_qualifying_alerts(settings_override: Optional[dict] = None) -> di
     }
 
 
+def _mark_alert_traded(alert_id: int, is_paper: bool, learning_mode: Optional[str]) -> None:
+    from app.database import get_conn
+    conn = get_conn()
+    action = "auto_paper" if is_paper else "auto_live"
+    if learning_mode:
+        conn.execute(
+            """UPDATE alerts
+                  SET status='paper_traded',
+                      details=json_set(
+                          json_set(coalesce(details,'{}'), '$.auto_entry_action', ?),
+                          '$.learning_mode', ?),
+                      updated_at=datetime('now')
+                WHERE id=?""",
+            (action, learning_mode, alert_id),
+        )
+    else:
+        conn.execute(
+            """UPDATE alerts
+                  SET status='paper_traded',
+                      details=json_set(coalesce(details,'{}'), '$.auto_entry_action', ?),
+                      updated_at=datetime('now')
+                WHERE id=?""",
+            (action, alert_id),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _run_explore_pass(
+    rows,
+    already_entered_alert_ids: set,
+    open_trade_tickers: set,
+    open_trade_events: set,
+    open_event_counts: dict,
+    paper_max_per_event: int,
+    settings: dict,
+    brain: dict,
+    quota: int,
+    entered: list,
+    errors: list,
+) -> int:
+    """Second pass: pick up to `quota` 1-contract paper trades from candidates
+    blocked by soft (evidence-based) blockers but NOT by iron-law blockers.
+    Used for forward-learning data collection on patterns we previously banned
+    based on retroactive estimates."""
+    from app.services.position_sizing import recommend_alert
+    from app.services.order_manager import place_order, recommendation_exit_args
+
+    candidates = []
+    for row in rows:
+        if row["id"] in already_entered_alert_ids:
+            continue
+        try:
+            details = json.loads(row["details"] or "{}")
+        except Exception:
+            details = {}
+        event_ticker = _event_ticker(row, details)
+        if event_ticker in open_trade_events:
+            continue
+        if row["market_ticker"] in open_trade_tickers:
+            continue
+        if paper_max_per_event > 0 and int(open_event_counts.get(event_ticker, 0)) >= paper_max_per_event:
+            continue
+
+        rec = recommend_alert({**dict(row), "details": details}, settings, explore=True)
+        rec = _with_current_segment_learning(rec, details, row["direction"])
+        if rec.get("blockers"):
+            # Iron-law (YES, NO sub-20c, NO 85c+) still active even in explore.
+            continue
+        contracts = int(rec.get("contracts") or 0)
+        if contracts < 1:
+            continue
+        side_edge = _as_float(rec.get("side_edge"))
+        expected = _as_float(rec.get("expected_value_per_contract"))
+        if side_edge <= 0 or expected <= 0:
+            continue
+        entry_price = float(rec.get("limit_price_yes") or row["market_price"] or 0)
+        if entry_price <= 0:
+            continue
+        candidates.append({
+            "row": row,
+            "details": details,
+            "event_ticker": event_ticker,
+            "recommendation": rec,
+            "entry_price": entry_price,
+            "side_edge": side_edge,
+        })
+
+    candidates.sort(key=lambda c: c["side_edge"], reverse=True)
+
+    n_entered = 0
+    stop_loss_pct = float(settings.get("stop_loss_pct") or 0.50)
+    take_profit_pct = float(settings.get("take_profit_pct") or 0.50)
+    for cand in candidates:
+        if n_entered >= quota:
+            break
+        row = cand["row"]
+        ticker = row["market_ticker"]
+        event_ticker = cand["event_ticker"]
+        if ticker in open_trade_tickers:
+            continue
+        if paper_max_per_event > 0 and int(open_event_counts.get(event_ticker, 0)) >= paper_max_per_event:
+            continue
+        rec = cand["recommendation"]
+        direction = row["direction"] or "yes"
+        alert_id = row["id"]
+        try:
+            result = place_order(
+                market_ticker=ticker,
+                direction=direction,
+                entry_price=cand["entry_price"],
+                alert_id=alert_id,
+                contracts=1,
+                **recommendation_exit_args(rec, stop_loss_pct, take_profit_pct),
+            )
+            _mark_alert_traded(alert_id, True, "explore")
+            logger.info("Explore-entry: %s %s x1 @ %.3f side_edge=%+.3f (trade_id=%s)",
+                        direction, ticker, cand["entry_price"], cand["side_edge"], result.get("trade_id"))
+            entered.append({"alert_id": alert_id, "ticker": ticker, "paper": True,
+                            "learning_mode": "explore", **result})
+            open_trade_tickers.add(ticker)
+            open_event_counts[event_ticker] = int(open_event_counts.get(event_ticker, 0)) + 1
+            n_entered += 1
+        except Exception as exc:
+            logger.error("Explore-entry failed for alert %d (%s): %s", alert_id, ticker, exc)
+            errors.append({"alert_id": alert_id, "ticker": ticker, "error": str(exc)})
+    return n_entered
+
+
 def _open_trade_events(conn) -> set[str]:
     rows = conn.execute("SELECT market_ticker FROM trades WHERE status='open'").fetchall()
     return {row["market_ticker"].rsplit("-", 1)[0] for row in rows}
+
+
+def _open_explore_trade_count(conn) -> int:
+    row = conn.execute(
+        """SELECT COUNT(*)
+             FROM trades t
+             LEFT JOIN alerts a ON a.id = t.alert_id
+            WHERE t.status='open'
+              AND t.paper=1
+              AND COALESCE(json_extract(a.details, '$.learning_mode'), '') = 'explore'"""
+    ).fetchone()
+    return int(row[0] or 0)
+
+
+def _current_open_explore_trade_count() -> int:
+    from app.database import get_conn
+    conn = get_conn()
+    try:
+        return _open_explore_trade_count(conn)
+    finally:
+        conn.close()
 
 
 def _open_trade_event_counts(conn, paper_only: bool = False) -> dict[str, int]:
@@ -595,6 +774,16 @@ def get_auto_entry_status() -> dict:
         "paper_min_ev": _setting_float(settings, "paper_learning_min_ev", 0.08, 0.0, 0.50),
         "paper_min_side_edge": _setting_float(settings, "paper_learning_min_side_edge", 0.08, 0.0, 0.50),
         "paper_max_contracts": _setting_int(settings, "paper_learning_max_contracts", 3, 1, 10),
+        "paper_explore_enabled": bool(settings.get("paper_learning_explore_enabled", False)),
+        "paper_explore_quota": _setting_int(settings, "paper_learning_explore_max_per_scan", 3, 0, 20),
+        "paper_explore_open": _current_open_explore_trade_count(),
+        "paper_explore_open_cap": _setting_int(
+            settings,
+            "paper_learning_explore_max_open",
+            min(_setting_int(settings, "max_open_paper_trades", 50, 1, 1000), 30),
+            1,
+            _setting_int(settings, "max_open_paper_trades", 50, 1, 1000),
+        ),
         "paper_ready": paper_ready,
         "live_ready": live_ready,
         "live_blocker": live_blocker,
@@ -687,5 +876,3 @@ def get_live_readiness_report() -> dict:
         "live_sized_candidates": candidates[:10],
         "blocked_reason_counts": blocked_reasons,
     }
-
-

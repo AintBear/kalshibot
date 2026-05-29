@@ -1148,10 +1148,14 @@ def _market_anchor(model_prob: float, market_price: float) -> float:
     return round(min(max(blended, 0.01), 0.99), 4)
 
 
-_ISOTONIC_KNOTS = [
+_IDENTITY_ISOTONIC_KNOTS = [
     (0.00, 0.00),
     (1.00, 1.00),
 ]
+_ISOTONIC_KNOTS = list(_IDENTITY_ISOTONIC_KNOTS)
+_MIN_ISOTONIC_SAMPLES = 500
+_MIN_ISOTONIC_BUCKETS = 5
+_MAX_ISOTONIC_BUCKET_SHARE = 0.80
 
 
 def _isotonic_calibrate(model_prob: float) -> float:
@@ -1178,6 +1182,7 @@ def rebuild_isotonic_calibration() -> dict:
             """SELECT
                  ROUND(CAST(json_extract(a.details, '$.raw_model_prob') AS REAL) * 10) / 10.0 as bucket,
                  COUNT(*) as n,
+                 AVG(CAST(json_extract(a.details, '$.raw_model_prob') AS REAL)) as avg_raw_prob,
                  AVG(CASE WHEN t.settlement_result='yes' THEN 1.0 ELSE 0.0 END) as actual_rate
                FROM trades t
                JOIN alerts a ON a.id = t.alert_id
@@ -1194,16 +1199,94 @@ def rebuild_isotonic_calibration() -> dict:
         return {"updated": False, "error": str(exc)}
 
     global _ISOTONIC_KNOTS
-    if len(rows) >= 3:
-        new_knots = [(float(r["bucket"]), round(float(r["actual_rate"]), 4)) for r in rows]
-        if new_knots[0][0] > 0.0:
-            new_knots.insert(0, (0.0, new_knots[0][1]))
-        if new_knots[-1][0] < 1.0:
-            new_knots.append((1.0, new_knots[-1][1]))
-        _ISOTONIC_KNOTS = new_knots
-        logger.info("Isotonic calibration rebuilt with %d knots", len(new_knots))
-        return {"updated": True, "knots": len(new_knots)}
-    return {"updated": False, "reason": "insufficient data"}
+    coverage = _isotonic_coverage(rows)
+    if not coverage["usable"]:
+        _ISOTONIC_KNOTS = list(_IDENTITY_ISOTONIC_KNOTS)
+        return {"updated": False, **coverage}
+
+    new_knots = _pava_isotonic_knots(rows)
+    if len(new_knots) < 3:
+        _ISOTONIC_KNOTS = list(_IDENTITY_ISOTONIC_KNOTS)
+        return {"updated": False, "reason": "insufficient_monotonic_knots", **coverage}
+
+    _ISOTONIC_KNOTS = new_knots
+    logger.info("Isotonic calibration rebuilt with %d knots", len(new_knots))
+    return {"updated": True, "knots": len(new_knots), **coverage}
+
+
+def _isotonic_coverage(rows) -> dict:
+    total = sum(int(r["n"] or 0) for r in rows)
+    buckets = len(rows)
+    max_bucket = max((int(r["n"] or 0) for r in rows), default=0)
+    max_bucket_share = round(max_bucket / total, 4) if total else 0.0
+    if total < _MIN_ISOTONIC_SAMPLES:
+        return {
+            "usable": False,
+            "reason": "insufficient_total_samples",
+            "samples": total,
+            "buckets": buckets,
+            "max_bucket_share": max_bucket_share,
+        }
+    if buckets < _MIN_ISOTONIC_BUCKETS:
+        return {
+            "usable": False,
+            "reason": "insufficient_bucket_coverage",
+            "samples": total,
+            "buckets": buckets,
+            "max_bucket_share": max_bucket_share,
+        }
+    if max_bucket_share > _MAX_ISOTONIC_BUCKET_SHARE:
+        return {
+            "usable": False,
+            "reason": "concentrated_bucket_coverage",
+            "samples": total,
+            "buckets": buckets,
+            "max_bucket_share": max_bucket_share,
+        }
+    return {
+        "usable": True,
+        "samples": total,
+        "buckets": buckets,
+        "max_bucket_share": max_bucket_share,
+    }
+
+
+def _pava_isotonic_knots(rows) -> list[tuple[float, float]]:
+    blocks = []
+    for row in rows:
+        n = int(row["n"] or 0)
+        if n <= 0:
+            continue
+        blocks.append({
+            "n": n,
+            "x_sum": float(row["avg_raw_prob"] if row["avg_raw_prob"] is not None else row["bucket"]) * n,
+            "y_sum": float(row["actual_rate"] or 0.0) * n,
+        })
+        while len(blocks) >= 2:
+            prev = blocks[-2]
+            cur = blocks[-1]
+            if prev["y_sum"] / prev["n"] <= cur["y_sum"] / cur["n"]:
+                break
+            merged = {
+                "n": prev["n"] + cur["n"],
+                "x_sum": prev["x_sum"] + cur["x_sum"],
+                "y_sum": prev["y_sum"] + cur["y_sum"],
+            }
+            blocks[-2:] = [merged]
+
+    interior = [
+        (
+            round(block["x_sum"] / block["n"], 4),
+            round(max(0.01, min(0.99, block["y_sum"] / block["n"])), 4),
+        )
+        for block in blocks
+    ]
+    knots = [(0.0, 0.0)]
+    for x, y in interior:
+        if 0.0 < x < 1.0 and (not knots or x > knots[-1][0]):
+            knots.append((x, y))
+    knots.append((1.0, 1.0))
+    return knots
 
 
 def _estimate_model_prob(

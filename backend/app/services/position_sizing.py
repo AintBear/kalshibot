@@ -2,8 +2,9 @@ import math
 import re
 from typing import Optional, Tuple
 
-_BLOCKED_CITY_SEGMENTS = {
+BLOCKED_CITY_SEGMENTS = {
     "KXLOWTDC",      # 28.6% accuracy, -$7.41, 7 trades
+    "KXLOWTDEN",     # 25.0% accuracy, -$8.16, 8 trades
     "KXLOWTPHIL",    # 28.6% accuracy, -$8.12, 7 trades
     "KXLOWTOKC",     # 36.4% accuracy, -$8.48, 11 trades
     "KXHIGHTNOLA",   # 37.5% accuracy, -$4.84, 8 trades
@@ -12,6 +13,7 @@ _BLOCKED_CITY_SEGMENTS = {
     "KXLOWTNOLA",    # 57.1% accuracy, -$4.24, 14 trades
     "KXHIGHTSFO",    # 60.0% accuracy, -$4.08, 15 trades
 }
+_BLOCKED_CITY_SEGMENTS = BLOCKED_CITY_SEGMENTS
 
 # Stop/TP audit snapshot from data/sibylla.db on 2026-05-08:
 # - Stop-loss exits are negative in every time-held bucket:
@@ -35,9 +37,15 @@ def paper_balance(settings: dict) -> float:
     return round(float(settings.get("paper_starting_balance", 500.0) or 500.0) + float(row[0] or 0.0), 2)
 
 
-def recommend_alert(alert: dict, settings: dict) -> dict:
+def recommend_alert(alert: dict, settings: dict, explore: bool = False) -> dict:
     """Adaptive sizing: paper mode uses relaxed gates to collect learning data;
-    live mode keeps all strict trust/segment gates."""
+    live mode keeps all strict trust/segment gates.
+
+    explore=True (paper only) suppresses soft, evidence-based blockers
+    (segment performance, threshold markets, 40c+ NO, blocked city+segment,
+    bracket within 1° of forecast). Iron-law blockers (YES at all, NO sub-20c,
+    NO 85c+) still apply — those are confirmed catastrophic patterns.
+    Explore trades are forced to 1 contract."""
     is_paper = settings.get("paper_trading", True)
 
     direction = alert.get("direction") or "yes"
@@ -109,26 +117,31 @@ def recommend_alert(alert: dict, settings: dict) -> dict:
     ticker_series = ticker_upper.split("-")[0] if "-" in ticker_upper else ticker_upper
     is_blocked_city_segment = ticker_series in _BLOCKED_CITY_SEGMENTS
     if is_paper:
-        if seg_prediction_bad and not unlimited_paper:
-            blockers.append(f"similar predictions only {seg_prediction_accuracy * 100:.0f}% correct")
-        if not unlimited_paper and seg_trade_count >= 10 and seg_recent_clv < 0 and seg_positive_rate < 0.25:
-            blockers.append(f"similar entries have weak results ({seg_positive_rate * 100:.0f}% good, recent {seg_recent_clv * 100:+.1f}c)")
-        if not unlimited_paper and direction == "yes":
+        # Iron-law blockers: catastrophic patterns confirmed on real settlements.
+        # Applied even in unlimited_paper and explore modes.
+        if direction == "yes":
             blockers.append("yes blocked (0% accuracy on 26 real settlements)")
-        if not unlimited_paper and is_threshold:
-            blockers.append("threshold markets blocked (25% NO accuracy, 0% YES accuracy)")
-        if not unlimited_paper and direction == "no" and mark_yes_price > 0.85:
-            blockers.append("no against 85c+ market (0% accuracy)")
-        if not unlimited_paper and direction == "no" and mark_yes_price < 0.20:
+        if direction == "no" and mark_yes_price < 0.20:
             blockers.append(f"no sub-20c blocked (need {breakeven_accuracy*100:.0f}% accuracy to break even)")
-        if not unlimited_paper and direction == "no" and not is_low_market and mark_yes_price > 0.40:
+        if direction == "no" and mark_yes_price > 0.85:
+            blockers.append("no against 85c+ market (0% accuracy)")
+
+        # Soft, evidence-based blockers: suppressed in unlimited or explore mode.
+        soft_off = unlimited_paper or explore
+        if not soft_off and seg_prediction_bad:
+            blockers.append(f"similar predictions only {seg_prediction_accuracy * 100:.0f}% correct")
+        if not soft_off and seg_trade_count >= 10 and seg_recent_clv < 0 and seg_positive_rate < 0.25:
+            blockers.append(f"similar entries have weak results ({seg_positive_rate * 100:.0f}% good, recent {seg_recent_clv * 100:+.1f}c)")
+        if not soft_off and is_threshold:
+            blockers.append("threshold markets blocked (25% NO accuracy, 0% YES accuracy)")
+        if not soft_off and direction == "no" and not is_low_market and mark_yes_price > 0.40:
             blockers.append("no-HIGH above 40c blocked (44% accuracy at 40-50c, losing money)")
-        if not unlimited_paper and direction == "no" and is_low_market and mark_yes_price > 0.40:
+        if not soft_off and direction == "no" and is_low_market and mark_yes_price > 0.40:
             blockers.append("no-LOW above 40c blocked (25% accuracy, losing money)")
-        if not unlimited_paper and is_blocked_city_segment:
+        if not soft_off and is_blocked_city_segment:
             blockers.append(f"{ticker_series} blocked (losing city+segment combo)")
-        if not unlimited_paper and forecast_distance is not None and forecast_distance <= 2.0:
-            blockers.append(f"bracket within {forecast_distance:.0f}° of forecast (coin flip zone)")
+        if not soft_off and forecast_distance is not None and forecast_distance <= 1.0:
+            blockers.append(f"bracket within {forecast_distance:.1f}° of forecast (coin flip zone)")
     else:
         if not seg_auto_eligible:
             blockers.append("similar trades have not earned auto sizing")
@@ -189,6 +202,9 @@ def recommend_alert(alert: dict, settings: dict) -> dict:
         if dollar_risk > max_dollar_risk:
             contracts = max(1, min(contracts, math.floor(max_dollar_risk / max(entry, 0.01))))
         contracts = min(contracts, ABSOLUTE_MAX_CONTRACTS)
+
+        if is_paper and explore:
+            contracts = 1
 
         if is_paper:
             action = "paper" if state == "paper_ready" else "learn"
@@ -252,6 +268,7 @@ def recommend_alert(alert: dict, settings: dict) -> dict:
         "drivers": drivers,
         "blockers": blockers,
         "reason": "; ".join(blockers[:3]) if blockers else "positive edge, positive expected value, and trust check passed",
+        "learning_mode": "explore" if (is_paper and explore) else None,
     }
 
 

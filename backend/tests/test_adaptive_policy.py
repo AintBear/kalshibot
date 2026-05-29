@@ -150,6 +150,50 @@ class TestAdaptivePolicy(unittest.TestCase):
         self.assertEqual(details["prediction_accuracy"], 0.0)
         self.assertEqual(result["weather_all:all"]["avg_clv"], -0.5)
 
+    def test_rebuild_holds_explore_trades_out_of_strategy_segments(self):
+        conn = sqlite3.connect(self.db_path)
+        import json
+
+        def add_trade(idx, pnl, clv, correct, details):
+            cur = conn.execute(
+                """INSERT INTO alerts
+                   (market_ticker, status, direction, market_price, model_prob, details)
+                   VALUES (?, 'paper_traded', 'no', 0.30, 0.10, ?)""",
+                (f"KXHIGHTBOS-26MAY22-B{idx}.5", json.dumps(details)),
+            )
+            conn.execute(
+                """INSERT INTO trades
+                   (market_ticker, alert_id, direction, entry_price, exit_price, clv, pnl,
+                    status, exit_reason, paper, prediction_correct, entry_time, exit_time)
+                   VALUES (?, ?, 'no', 0.30, ?, ?, ?,
+                           'closed', 'market_closed', 1, ?, datetime('now'), datetime('now'))""",
+                (
+                    f"KXHIGHTBOS-26MAY22-B{idx}.5",
+                    cur.lastrowid,
+                    0.0 if correct else 1.0,
+                    clv,
+                    pnl,
+                    correct,
+                ),
+            )
+
+        base = {"segment": "high_bracket", "time_bucket": "same_day"}
+        for i in range(5):
+            add_trade(i, 0.30, 0.10, 1, base)
+        for i in range(5, 10):
+            add_trade(i, -0.70, -0.20, 0, {**base, "learning_mode": "explore"})
+        conn.commit()
+        conn.close()
+
+        from app.services.adaptive_policy import rebuild_snapshots
+        result = rebuild_snapshots()
+
+        self.assertEqual(result["weather_all:all"]["trade_count"], 5)
+        self.assertEqual(result["explore:weather_all:all"]["trade_count"], 5)
+        self.assertFalse(result["explore:weather_all:all"]["auto_eligible"])
+        self.assertFalse(result["explore:weather_all:all"]["details"]["paper_auto_eligible"])
+        self.assertEqual(result["weather_all:all"]["details"]["prediction_accuracy"], 1.0)
+
     def test_lookup_returns_fallback_for_unknown_segment(self):
         from app.services.adaptive_policy import lookup_adjustment
         adj = lookup_adjustment("unknown:segment")

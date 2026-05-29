@@ -126,6 +126,44 @@ class TestBrainStatusSamples(unittest.TestCase):
         self.assertEqual(status["prediction_accuracy"], 0.0)
         self.assertEqual(status["excluded_reset_trades"], 10)
 
+    def test_strategy_metrics_exclude_explore_and_blocked_city_segments(self):
+        conn = sqlite3.connect(self.db_path)
+
+        def add_trade(ticker, pnl, clv, correct, details=None):
+            cur = conn.execute(
+                """INSERT INTO alerts
+                   (market_ticker, status, direction, market_price, model_prob, details)
+                   VALUES (?, 'paper_traded', 'no', 0.30, 0.10, ?)""",
+                (ticker, json.dumps(details or {})),
+            )
+            conn.execute(
+                """INSERT INTO trades
+                   (market_ticker, alert_id, direction, entry_price, exit_price, clv, pnl,
+                    status, exit_reason, paper, prediction_correct, exit_time)
+                   VALUES (?, ?, 'no', 0.30, ?, ?, ?,
+                           'closed', 'market_closed', 1, ?, datetime('now'))""",
+                (ticker, cur.lastrowid, 0.0 if correct else 1.0, clv, pnl, correct),
+            )
+
+        for i in range(3):
+            add_trade(f"KXHIGHTBOS-26MAY22-B7{i}.5", 0.30, 0.10, 1)
+        for i in range(2):
+            add_trade(f"KXHIGHTBOS-26MAY23-B8{i}.5", -0.70, -0.20, 0, {"learning_mode": "explore"})
+        for i in range(2):
+            add_trade(f"KXLOWTDEN-26MAY24-B5{i}.5", -0.70, -0.20, 0)
+        conn.commit()
+        conn.close()
+
+        from app.services.weather_brain import get_brain_status
+        status = get_brain_status()
+
+        self.assertEqual(status["learning_samples"], 3)
+        self.assertEqual(status["prediction_sample_count"], 3)
+        self.assertEqual(status["prediction_correct_count"], 3)
+        self.assertEqual(status["prediction_accuracy"], 1.0)
+        self.assertEqual(status["explore_stats"]["settled_trades"], 2)
+        self.assertEqual(status["explore_stats"]["prediction_accuracy"], 0.0)
+
     def test_live_entry_quality_stays_blocked_when_paper_pnl_and_hit_rate_are_bad(self):
         conn = sqlite3.connect(self.db_path)
         for i in range(7):
@@ -193,6 +231,32 @@ class TestPositionSizingTiers(unittest.TestCase):
         self.assertEqual(rec["contracts"], 1)
         self.assertNotIn("event already has an open paper trade", rec["blockers"])
         self.assertIn(rec["tier"], ("learning", "tier_b", "tier_a"))
+
+    def test_den_low_segment_is_blocked_by_strategy_filter(self):
+        from app.services.position_sizing import recommend_alert
+
+        rec = recommend_alert(
+            {
+                "market_ticker": "KXLOWTDEN-26MAY22-B39.5",
+                "direction": "no",
+                "market_price": 0.30,
+                "model_prob": 0.10,
+                "confidence": 0.80,
+                "brain_score": 70,
+                "brain_state": "watch",
+                "phantom_risk_level": "none",
+                "details": {},
+            },
+            {
+                "paper_trading": True,
+                "paper_unlimited_learning": False,
+                "paper_starting_balance": 500,
+                "paper_learning_max_contracts": 3,
+            },
+        )
+
+        self.assertTrue(any("KXLOWTDEN blocked" in blocker for blocker in rec["blockers"]))
+        self.assertEqual(rec["contracts"], 0)
 
     def test_recommendation_uses_side_ask_for_no_entry(self):
         from app.services.position_sizing import recommend_alert
@@ -746,6 +810,49 @@ class TestAutoEntryExecutionGates(unittest.TestCase):
         tickers = [call.kwargs["market_ticker"] for call in place_order.call_args_list]
         self.assertIn("KXHIGHELIG-26APR30-B51", tickers)
         self.assertNotIn("KXHIGHDUP-26APR30-B0", tickers)
+
+    def test_auto_entry_respects_explore_open_cap(self):
+        conn = sqlite3.connect(self.db_path)
+        for i in range(2):
+            cur = conn.execute(
+                """INSERT INTO alerts
+                   (market_ticker, status, direction, market_price, model_prob, details)
+                   VALUES (?, 'paper_traded', 'no', 0.50, 0.10, ?)""",
+                (f"KXEXPLOREOPEN-26APR30-B{i}", json.dumps({"learning_mode": "explore"})),
+            )
+            conn.execute(
+                """INSERT INTO trades
+                   (market_ticker, alert_id, direction, entry_price, contracts, paper, status, entry_time)
+                   VALUES (?, ?, 'no', 0.50, 1, 1, 'open', datetime('now'))""",
+                (f"KXEXPLOREOPEN-26APR30-B{i}", cur.lastrowid),
+            )
+        self._insert_open_market(conn, "KXHIGHTEST-26APR30-B51")
+        conn.execute(
+            """INSERT INTO alerts
+               (market_ticker, status, edge, direction, market_price, model_prob,
+                confidence, brain_score, brain_state, phantom_risk_level, details)
+               VALUES ('KXHIGHTEST-26APR30-B51', 'pending', -0.40, 'no', 0.50, 0.10,
+                       0.80, 64, 'caution', 'none', '{}')"""
+        )
+        conn.commit()
+        conn.close()
+
+        settings = {
+            **self._settings(),
+            "paper_unlimited_learning": False,
+            "paper_learning_explore_enabled": True,
+            "paper_learning_explore_max_per_scan": 3,
+            "paper_learning_explore_max_open": 2,
+        }
+        with patch("app.config.load", return_value=settings), \
+             patch("app.services.weather_brain.get_brain_status", return_value={**self._brain(), "open_trades": 2}), \
+             patch("app.services.order_manager.place_order", return_value={"trade_id": 456}) as place_order:
+            from app.services.auto_entry import auto_enter_qualifying_alerts
+            result = auto_enter_qualifying_alerts()
+
+        self.assertEqual(result["explore_quota"], 0)
+        self.assertEqual(result["explore_entered"], 0)
+        place_order.assert_not_called()
 
     def test_auto_entry_skips_current_low_prediction_accuracy_segment(self):
         conn = sqlite3.connect(self.db_path)

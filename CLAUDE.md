@@ -1,45 +1,65 @@
 # KalshiBot - Project Instructions
 
-## Bot Status (updated 2026-05-29, session 9)
+## Bot Status (updated 2026-05-29, session 11 — verified from DB/runtime)
 
-**Prediction Accuracy: 77.1% (strategy, pre-session-8)** | **Paper P&L: -$225.03 overall** | **0 open trades** | **566 real settlements**
+**Overall realized P&L: -$76.36** on 567 real `market_closed` settlements | **Strategy zone P&L: +$25.61** on 256 NO 20-40c bracket trades (blocked cities + explore excluded) | **60 open paper trades** (30 strategy, 30 explore) | **Brain score: 71**
 
-The bot was silently dead from 2026-05-21 through 2026-05-28 (stuck DNS resolver in long-running uvicorn). Restarted this session — now producing 364 active alerts, NWS + Open-Meteo both responding. Session-7 city-blocker validation is still pending — needs fresh settlements under the new rules.
+### What's actually true
 
-Progress toward fully automated trading:
+- The bot is running and entering paper trades again after the session-11 calibration guard and fresh scan. Latest scan processed 539/539 markets, created 69 alerts, and opened 30 strategy-zone paper trades plus the final explore trade up to the 30-open explore cap.
+- The "77.1% strategy accuracy" figure carried forward across sessions 7/8/9 was a **retroactive** simulation — it filtered historical trades by what *would* have been allowed under the new blocker rules. Forward validation on those rules never happened because the bot stopped trading right after they shipped.
+- Real DB numbers (excluding `paper_reset`, `bulk_cleanup`, and explore from strategy stats): 567 market-closed settlements, -$76.36 realized P&L overall. The code-aligned strategy zone (NO 20-40c bracket trades, blocked cities removed including KXLOWTDEN, non-threshold) is the only consistently profitable slice: 256 trades, 76.2% accuracy, +$25.61 P&L.
 
-```
-[==============······] ~70%  LEARNING PHASE — back online after 7-day outage, awaiting forward validation
-```
+### What changed this session
 
-| Gate                        | Current              | Target     | Status |
-|-----------------------------|----------------------|------------|--------|
-| Prediction accuracy (strat) | 77.1% (240 samp)    | >70%       | PASS   |
-| NO 20-40c win rate (filtered)| 77.1% (240 trades) | >= 70%     | PASS   |
-| NO 20-40c P&L (filtered)   | +$30.79 (retro)      | >= $0      | PASS*  |
-| Overall P&L (all trades)   | -$225.03             | >= $0      | FAIL   |
-| Brain trust score          | TBD (rebuild needed) | >= 90      | FAIL   |
-| Kalshi credentials         | configured           | configured | PASS   |
-| Auto-eligible segments     | 5 (paper)            | >= 1       | PASS   |
-| Second forecast source     | NWS + Open-Meteo     | working    | PASS   |
-| City+segment blockers      | 8 combos blocked     | working    | PASS   |
-| Bot actively scanning       | yes (after restart)  | yes        | PASS   |
+Session 10 added **explore-mode learning** (`paper_learning_explore_enabled`, default 3 trades/run): the bot takes 1-contract paper bets on candidates blocked by *soft* blockers — threshold markets, NO 40c+, blocked city+segment, bracket within 1° of forecast — while still respecting the **iron-law blockers** (YES at all, NO sub-20c, NO 85c+). Session 11 capped explore at 30 open trades and excluded explore outcomes from strategy learning until reviewed.
 
-*Strategy P&L is retroactive — computed by excluding the 8 blocked city+segment combos from historical data. New trades under these rules haven't been placed yet; need live validation.
+Session 11 also stopped the dynamic isotonic rebuild from overwriting identity calibration with the current concentrated bucket data. The running backend had been rebuilding 8 non-monotonic/sparse knots, which pushed many raw 0.08-0.12 probabilities to about 0.37 and helped create an overwhelmingly YES alert universe. Startup now leaves isotonic at identity until coverage is broad enough.
 
-The bot is in **paper-learning mode**. Key breakthrough this session: discovered city+segment performance is wildly uneven (14% to 100%). Blocking 8 consistently losing combos retroactively flips strategy accuracy from 67.8% to 77.1% and P&L from -$26.90 to +$30.79. Open-Meteo replaces expired AccuWeather as free second forecast source. Isotonic calibration auto-rebuilds on startup.
+| Gate                        | Current (verified)         | Target     | Status |
+|-----------------------------|----------------------------|------------|--------|
+| Strategy zone win rate      | 76.2% (256 settlements)    | >= 70%     | PASS   |
+| Strategy zone P&L           | +$25.61                    | >= $0      | PASS   |
+| Overall realized P&L        | -$76.36 (567 settlements)  | >= $0      | FAIL   |
+| Bot entering new trades     | yes (30 strategy + 30 explore open) | yes | PASS |
+| Brain trust score           | 71                         | >= 90      | FAIL   |
+| Kalshi credentials          | configured                 | configured | PASS   |
+| Auto-eligible segments      | 5 (paper)                  | >= 1       | PASS   |
+| Forecast sources            | NWS + Open-Meteo + AccuW   | working    | PASS   |
 
 ## Daily Improvement System
 
 Each session, do exactly two things from this priority list (top = highest impact):
 
-1. **Validate city blockers with live data** — The 8 blocked city+segment combos are based on historical data. Need 50+ new settlements under the new rules to confirm the retroactive P&L improvement holds in forward testing.
-2. **Tune isotonic calibration** — Auto-rebuild is wired up but the model mostly outputs 0.0-0.1 probabilities. May need sigma adjustment or calibration smoothing.
-3. **Monitor Open-Meteo integration** — Verify NWS+Open-Meteo averaging improves accuracy vs NWS-only. Watch for systematic disagreement patterns.
-4. **Expand city blocker data** — Some combos have small sample sizes (7-8 trades). As more data accumulates, re-evaluate which combos to block/unblock.
+1. **Forward-validate open strategy and explore trades separately** — 30 strict strategy trades and 30 explore trades are now open. Wait for settlement before relaxing blockers or increasing explore.
+2. **Keep isotonic conservative** — current clean data has 564 usable bucketed samples but 82.8% sit in one 0.1 bucket, so identity is safer than a global correction. Revisit only after broader raw-probability coverage.
+3. **Inspect calibration by market slice, not global only** — the strategy zone is true YES 25.4% against avg market 29.9%, while the global traded sample is true YES 37.4%. A global calibration can erase the edge.
+4. **Review `paper_learning_explore_max_open` after settlements** — default is now 30 open explore trades. Increase only if the first settled explore cohort is clean.
 5. **Infrastructure** — Tests, monitoring, deployment reliability.
 
 After each session, update the status table above and note what changed.
+
+## What Was Done (2026-05-29, session 10)
+
+- **Diagnosed: bot was alive but blocked from trading.** Scheduler running fine (scans 15min, auto-entry 5min, lifecycle 5min). Manual `/api/auto-trade/run` returned `candidates_considered=376, eligible_candidates=0` on every cycle. Of 200 pending alerts, 189 were YES (correctly iron-law blocked) and 11 were NO with positive NO-side edge but **all rejected by soft blockers** (threshold markets, NO 40c+, blocked city+segment, bracket within 2°). Net: bot has been trade-less since May 21.
+- **Found the CLAUDE.md status table was overstated.** Verified DB shows 567 real `market_closed` settlements (matches "566 real settlements" line), -$76.36 realized P&L (vs claimed -$225.03 which counted bulk_cleanup losses), and the "77.1% accuracy / 240 trades" strategy line was a retroactive simulation never forward-validated. Real strategy-zone (NO 20-40c bracket, blocked cities removed, non-threshold) is 274 trades / 74.1% accuracy / +$17.25 — solid but smaller than the headline number suggested.
+- **Refactored `position_sizing.recommend_alert` blocker logic** into iron-law (always-on) vs soft (evidence-based) layers. Added `explore: bool = False` parameter. Iron-law in paper mode: YES at all, NO sub-20c, NO 85c+ (all three confirmed catastrophic on real settlements). Soft blockers (threshold, NO 40c+, blocked-city, segment performance, bracket within 1° of forecast) are suppressed in explore mode.
+- **Tightened `bracket within 2° of forecast` → `bracket within 1° of forecast`** in the soft-blocker tier. The 2° rule was excluding too many borderline-but-tradeable bracket markets.
+- **Added explore second-pass to `auto_entry.auto_enter_qualifying_alerts`.** After the normal entry loop finishes, if `paper_learning_explore_enabled` is true, re-scans rejected candidates with `explore=True`, ranks by `side_edge`, and enters up to `paper_learning_explore_max_per_scan` (default 3) at 1 contract each. Each explore trade is tagged `learning_mode='explore'` in the alert details for downstream filtering.
+- **Added settings** `paper_learning_explore_enabled: true` and `paper_learning_explore_max_per_scan: 3` to `config/settings.json`.
+- **Verified**: post-restart, three sequential `/api/auto-trade/run` calls each placed 3 explore trades. 9 paper trades now open (was 0 before the change), all NO bets on bracket/threshold markets with side_edge +5c to +40c. All 101 tests still pass.
+- **KXRAIN warnings investigated** — not a bug. `KXRAIN*M` are monthly accumulation markets correctly skipped by `_requires_accumulation_model()` in `_estimate_model_prob()`. The log line is just noise.
+- **Known follow-up (not done this session):** `weather_brain.py` segment-stats queries should exclude `learning_mode='explore'` so explore losses don't degrade strategy-mode segment scores. Listed as priority #2 above.
+
+## What Was Done (2026-05-29, session 11 — Codex)
+
+- **Did not commit session 10 as-is.** I agreed with the iron-law / soft-block split in principle, but found three issues that needed correction first: strategy stats were not excluding blocked city segments, `KXLOWTDEN` was documented as blocked but missing from code, and explore mode could keep filling the book because the live `max_open_paper_trades` cap is 500.
+- **Verified Claude's strategy-zone claim against the DB and corrected the numbers.** With the actual code blocker list before my fix: 264 trades, 74.6% accuracy, +$17.45. After adding the data-backed `KXLOWTDEN` blocker: 256 trades, 76.2% accuracy, +$25.61. The broader unblocked NO 20-40c non-threshold slice is only 345 trades, 67.8%, -$30.00, so the blocked-city filter materially matters.
+- **Pushed back on the calibration diagnosis.** The source file default was identity, but the running backend had rebuilt 8 isotonic knots from concentrated buckets. Current clean bucket coverage is 564 samples across 7 usable buckets, but 82.8% are in the 0.1 bucket. That sparse global rebuild was pushing raw 0.08-0.12 probabilities toward ~0.37 and contributing to an overly YES-heavy alert universe. I changed the rebuild to require broader coverage, use monotonic PAVA when coverage is adequate, and otherwise leave identity in place.
+- **Separated explore from strategy learning.** `weather_brain.py` now excludes `learning_mode='explore'` from strategy learning samples, CLV, P&L, recent windows, and prediction accuracy, while returning separate `explore_stats`. `adaptive_policy.rebuild_snapshots()` now keeps normal segment snapshots strategy-only and writes `explore:*` snapshots as held-out, non-auto-eligible diagnostics.
+- **Capped explore mode.** Added defaults and example settings for `paper_learning_explore_max_open=30`; auto-entry now reports explore open/cap and will not exceed that cap. After restart and scan, open paper book is 60 total: 30 strict strategy trades and 30 explore trades.
+- **Verified runtime after changes.** Full backend tests pass (`107 passed`). Restarted backend. `/health` is OK. Startup calibration logged `updated=False`, `reason='concentrated_bucket_coverage'`. Fresh scan completed 539/539 markets, 69 alerts, 0 series errors, AccuWeather live. Pending alerts after scan: 314 total, 119 NO, 195 YES, with 25 strict-zone NO candidates still pending after 30 strategy entries.
+- **What Claude should scrutinize next:** whether identity calibration plus market anchor is still too extreme in specific slices, and whether the 30 newly opened strict strategy trades actually settle near the historical 76% rate. Do not increase explore until the current 30 explore trades settle.
 
 ## What Was Done (2026-05-29, session 9)
 
