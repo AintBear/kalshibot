@@ -338,17 +338,18 @@ def _best_event_option(rows) -> Optional[dict]:
     return best
 
 
-def _refresh_alert_quotes(conn, rows) -> None:
+def _refresh_alert_quotes(conn, rows, force: bool = False) -> set[int]:
     from app import config as cfg
     from app.services import weather_brain, weather_model, position_sizing
     from app.services.kalshi_client import get_market, quote_from_market, settlement_result_from_market
 
     settings = cfg.load()
+    refreshed_ids: set[int] = set()
     for row in rows:
         alert = dict(row)
         if alert.get("status") not in ("pending", "paper_traded"):
             continue
-        if _fresh_enough(alert.get("market_updated_at"), seconds=25):
+        if not force and _fresh_enough(alert.get("market_updated_at"), seconds=25):
             continue
         ticker = alert["market_ticker"]
         market = get_market(ticker)
@@ -468,7 +469,9 @@ def _refresh_alert_quotes(conn, rows) -> None:
                 alert["id"],
             ),
         )
+        refreshed_ids.add(int(alert["id"]))
     conn.commit()
+    return refreshed_ids
 
 
 def _fresh_enough(value, seconds: int) -> bool:
@@ -556,23 +559,28 @@ def paper_trade_alert(alert_id: int, payload: Optional[dict] = Body(default=None
         take_profit_pct = settings.get("take_profit_pct", 0.50)
 
     conn = get_conn()
-    row = conn.execute(
-        """SELECT alerts.*,
-                  markets.status AS market_status,
-                  markets.close_time AS market_close_time,
-                  markets.raw_json AS market_raw_json,
-                  markets.yes_bid AS live_yes_bid,
-                  markets.yes_ask AS live_yes_ask,
-                  markets.no_bid AS live_no_bid,
-                  markets.no_ask AS live_no_ask
-             FROM alerts
-             LEFT JOIN markets ON markets.ticker = alerts.market_ticker
-            WHERE alerts.id=?""",
-        (alert_id,),
-    ).fetchone()
+    row = _load_paper_trade_alert(conn, alert_id)
     if row is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Alert not found")
+    requested_direction = (payload.get("direction") or row["direction"] or "").lower()
+
+    _QUOTE_REFRESH_LOCK.acquire()
+    try:
+        refreshed_ids = _refresh_alert_quotes(conn, [row], force=True)
+    finally:
+        _QUOTE_REFRESH_LOCK.release()
+    if alert_id not in refreshed_ids:
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="Could not refresh the live Kalshi quote for this paper trade. Try again in a moment.",
+        )
+
+    row = _load_paper_trade_alert(conn, alert_id)
+    if row is None:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Alert not found after quote refresh")
 
     alert = dict(row)
     try:
@@ -583,6 +591,25 @@ def paper_trade_alert(alert_id: int, payload: Optional[dict] = Body(default=None
     alert["yes_ask"] = alert.get("live_yes_ask")
     alert["no_bid"] = alert.get("live_no_bid")
     alert["no_ask"] = alert.get("live_no_ask")
+
+    refreshed_direction = (alert.get("direction") or "").lower()
+    if requested_direction in ("yes", "no") and refreshed_direction != requested_direction:
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Live Kalshi refresh changed this signal from {requested_direction.upper()} to {refreshed_direction.upper()}; refresh the page before paper trading it.",
+        )
+
+    market_status = (alert.get("market_status") or "").lower()
+    if market_status not in ("open", "active"):
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"Market is {market_status or 'not open'}, not tradable")
+    if not _fresh_enough(alert.get("market_updated_at"), seconds=20) or not _side_entry_quote_available(alert, details):
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="Live Kalshi bid/ask is not fresh enough to paper-fill this trade.",
+        )
 
     from app.services.position_sizing import recommend_alert
     recommendation = recommend_alert({**alert, "details": details}, settings)
@@ -643,11 +670,32 @@ def paper_trade_alert(alert_id: int, payload: Optional[dict] = Body(default=None
     return {"status": "paper_traded", "alert_id": alert_id, **result}
 
 
+def _load_paper_trade_alert(conn, alert_id: int):
+    return conn.execute(
+        """SELECT alerts.*,
+                  markets.status AS market_status,
+                  markets.close_time AS market_close_time,
+                  markets.updated_at AS market_updated_at,
+                  markets.raw_json AS market_raw_json,
+                  markets.yes_bid AS live_yes_bid,
+                  markets.yes_ask AS live_yes_ask,
+                  markets.no_bid AS live_no_bid,
+                  markets.no_ask AS live_no_ask
+             FROM alerts
+             LEFT JOIN markets ON markets.ticker = alerts.market_ticker
+            WHERE alerts.id=?""",
+        (alert_id,),
+    ).fetchone()
+
+
 def _validate_learning_override(alert: dict, recommendation: dict) -> None:
     side_edge = _first_number(recommendation.get("side_edge"))
     expected_value = _first_number(recommendation.get("expected_value_per_contract"))
     phantom = (alert.get("phantom_risk_level") or "none").lower()
     blockers = []
+    rec_blockers = [str(b) for b in (recommendation.get("blockers") or []) if b]
+    if rec_blockers:
+        blockers.extend(rec_blockers)
     if side_edge is None or side_edge <= 0:
         blockers.append("no positive edge")
     if expected_value is None or expected_value <= 0:
@@ -686,12 +734,31 @@ def _paper_entry_yes_price(alert: dict, details: dict, recommendation: dict) -> 
         no_ask = _first_price(alert.get("live_no_ask"), alert.get("no_ask"), details.get("no_ask"))
         if no_ask is not None:
             return round(_bounded_price(1.0 - no_ask), 4)
+        yes_bid = _first_price(alert.get("live_yes_bid"), alert.get("yes_bid"), details.get("yes_bid"))
+        if yes_bid is not None:
+            return round(_bounded_price(yes_bid), 4)
     else:
         yes_ask = _first_price(alert.get("live_yes_ask"), alert.get("yes_ask"), details.get("yes_ask"))
         if yes_ask is not None:
             return round(_bounded_price(yes_ask), 4)
+        no_bid = _first_price(alert.get("live_no_bid"), alert.get("no_bid"), details.get("no_bid"))
+        if no_bid is not None:
+            return round(_bounded_price(1.0 - no_bid), 4)
 
     return round(_bounded_price(alert.get("market_price")), 4)
+
+
+def _side_entry_quote_available(alert: dict, details: dict) -> bool:
+    direction = (alert.get("direction") or "yes").lower()
+    if direction == "no":
+        return (
+            _first_price(alert.get("live_no_ask"), alert.get("no_ask"), details.get("no_ask")) is not None
+            or _first_price(alert.get("live_yes_bid"), alert.get("yes_bid"), details.get("yes_bid")) is not None
+        )
+    return (
+        _first_price(alert.get("live_yes_ask"), alert.get("yes_ask"), details.get("yes_ask")) is not None
+        or _first_price(alert.get("live_no_bid"), alert.get("no_bid"), details.get("no_bid")) is not None
+    )
 
 
 def _first_price(*values) -> Optional[float]:

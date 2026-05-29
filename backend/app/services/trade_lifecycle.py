@@ -108,8 +108,7 @@ def check_live_prices(min_interval_seconds: int = 0) -> dict:
         trades = conn.execute(
             """SELECT * FROM trades
                 WHERE status='open'
-                  AND paper=1
-                  AND (stop_loss_price IS NOT NULL OR take_profit_price IS NOT NULL)"""
+                  AND paper=1"""
         ).fetchall()
         conn.close()
 

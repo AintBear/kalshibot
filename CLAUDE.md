@@ -1,13 +1,15 @@
 # KalshiBot - Project Instructions
 
-## Bot Status (updated 2026-05-29, session 12 — verified from DB/runtime)
+## Bot Status (updated 2026-05-29, session 13 — verified from DB/runtime)
 
-**Overall realized P&L: -$76.36** on 567 real `market_closed` settlements | **Strategy zone P&L: +$25.61** on 256 NO 20-40c bracket trades (blocked cities + explore excluded) | **80 open paper trades** (50 strategy, 30 legacy explore) | **Brain score: 71**
+**Overall realized P&L: -$76.36** on 567 real `market_closed` settlements | **Strategy zone P&L: +$25.61** on 256 NO 20-40c bracket trades (blocked cities + explore excluded) | **77 open paper trades** (47 strategy, 30 legacy explore) | **Brain score: 71**
 
 ### What's actually true
 
 - The bot is running from `/Users/AintBear/Projects/kalshibot` with a launchd watchdog installed. Latest verified scan processed 539/539 markets with 0 series errors. Watchdog last exit code was 0 and live auto remains off.
 - New paper entries are strict-strategy only. `paper_learning_explore_enabled` is now false in the local runtime and in `config/settings.example.json`; the 30 open explore trades are legacy held-out diagnostics and should not affect strategy learning.
+- Manual paper clicks now force a live Kalshi quote refresh before writing a paper fill. Open paper marks refresh all open paper trades, not only trades with stop/target exits. UI marks open positions at the exit bid and labels spread cost explicitly.
+- Manual learning override no longer bypasses recommendation blockers. YES blockers, no sub-20c blockers, no 85c+ blockers, and other strategy blockers stay active even when the user clicks a manual paper button.
 - The "77.1% strategy accuracy" figure carried forward across sessions 7/8/9 was a **retroactive** simulation — it filtered historical trades by what *would* have been allowed under the new blocker rules. Forward validation on those rules never happened because the bot stopped trading right after they shipped.
 - Real DB numbers (excluding `paper_reset`, `bulk_cleanup`, and explore from strategy stats): 567 market-closed settlements, -$76.36 realized P&L overall. The code-aligned strategy zone (NO 20-40c bracket trades, blocked cities removed including KXLOWTDEN, non-threshold) is the only consistently profitable slice: 256 trades, 76.2% accuracy, +$25.61 P&L.
 
@@ -19,12 +21,14 @@ Session 11 also stopped the dynamic isotonic rebuild from overwriting identity c
 
 Session 12 added a macOS launchd watchdog. It starts Docker Compose if down, restarts backend on failed health, triggers a scan if stale/missing, and pokes paper auto-entry only when paper auto is enabled and ready. It never enables live trading.
 
+Session 13 fixed paper visibility and paper-fill realism. The Paper page now shows 77 open trades, bid-mark P&L, spread, and mark type. Manual paper entry now hard-refreshes the selected Kalshi market at click time and refuses to fill if live bid/ask cannot be refreshed.
+
 | Gate                        | Current (verified)         | Target     | Status |
 |-----------------------------|----------------------------|------------|--------|
 | Strategy zone win rate      | 76.2% (256 settlements)    | >= 70%     | PASS   |
 | Strategy zone P&L           | +$25.61                    | >= $0      | PASS   |
 | Overall realized P&L        | -$76.36 (567 settlements)  | >= $0      | FAIL   |
-| Bot entering new trades     | yes (50 strategy + 30 legacy explore open; new explore disabled) | yes | PASS |
+| Bot entering new trades     | yes (47 strategy + 30 legacy explore open; new explore disabled) | yes | PASS |
 | Brain trust score           | 71                         | >= 90      | FAIL   |
 | Kalshi credentials          | configured                 | configured | PASS   |
 | Auto-eligible segments      | 5 (paper)                  | >= 1       | PASS   |
@@ -34,13 +38,22 @@ Session 12 added a macOS launchd watchdog. It starts Docker Compose if down, res
 
 Each session, do exactly two things from this priority list (top = highest impact):
 
-1. **Forward-validate open strategy and legacy explore trades separately** — 50 strategy trades and 30 legacy explore trades are now open. Wait for settlement before relaxing blockers or re-enabling explore.
+1. **Forward-validate open strategy and legacy explore trades separately** — 47 strategy trades and 30 legacy explore trades are now open. Wait for settlement before relaxing blockers or re-enabling explore.
 2. **Keep isotonic conservative** — current clean data has 564 usable bucketed samples but 82.8% sit in one 0.1 bucket, so identity is safer than a global correction. Revisit only after broader raw-probability coverage.
 3. **Inspect calibration by market slice, not global only** — the strategy zone is true YES 25.4% against avg market 29.9%, while the global traded sample is true YES 37.4%. A global calibration can erase the edge.
 4. **Keep strict mode on unless explore proves useful** — `paper_learning_explore_enabled=false` now. Re-enable only if the current 30 held-out explore trades settle cleanly.
 5. **Infrastructure** — Tests, monitoring, deployment reliability.
 
 After each session, update the status table above and note what changed.
+
+## What Was Done (2026-05-29, session 13 — Codex)
+
+- **Fixed paper trade visibility.** Verified `/api/trades?status=open` returns 77 open paper trades and the Paper page renders `OPEN PAPER TRADES (77)` after reload.
+- **Forced click-time Kalshi quote refresh.** `POST /api/alerts/{id}/paper-trade` now refreshes the selected market from Kalshi before sizing/filling and rejects the click if live bid/ask cannot be refreshed.
+- **Made bid/ask spread explicit.** Open trade API responses now include `entry_side_price`, `current_side_bid`, `current_side_ask`, `current_spread`, `spread_mark_cost`, and `mark_price_type='exit_bid'`. The Paper page and active-trades strip label the mark as exit bid/spread instead of implying the prediction instantly lost.
+- **Refreshed all open marks.** `check_live_prices()` now refreshes every open paper trade, not only trades with stop-loss/take-profit fields. This keeps open paper marks current even though paper trades now ride to settlement.
+- **Closed manual override blocker bypass.** Backend override validation now rejects any recommendation blocker, and frontend paper buttons no longer enable manual paper when blockers exist. Browser verification showed prior YES candidates now display `Wait` with `yes blocked`.
+- **Verified.** Backend health OK, full backend tests pass (`113 passed`), frontend production build passes, and browser reload confirms Paper page shows open trades plus bid/spread labels.
 
 ## What Was Done (2026-05-29, session 12 — Codex)
 

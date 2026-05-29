@@ -626,6 +626,17 @@ class TestPaperEntryPricing(unittest.TestCase):
 
         self.assertAlmostEqual(price, 0.18, places=4)
 
+    def test_no_paper_entry_can_fallback_to_yes_bid(self):
+        from app.routers.alerts import _paper_entry_yes_price
+
+        price = _paper_entry_yes_price(
+            {"direction": "no", "market_price": 0.205, "live_yes_bid": 0.19},
+            {},
+            {},
+        )
+
+        self.assertAlmostEqual(price, 0.19, places=4)
+
     def test_yes_paper_entry_uses_yes_ask(self):
         from app.routers.alerts import _paper_entry_yes_price
 
@@ -636,6 +647,54 @@ class TestPaperEntryPricing(unittest.TestCase):
         )
 
         self.assertAlmostEqual(price, 0.23, places=4)
+
+    def test_yes_paper_entry_can_fallback_to_no_bid(self):
+        from app.routers.alerts import _paper_entry_yes_price
+
+        price = _paper_entry_yes_price(
+            {"direction": "yes", "market_price": 0.205, "live_no_bid": 0.76},
+            {},
+            {},
+        )
+
+        self.assertAlmostEqual(price, 0.24, places=4)
+
+    def test_open_no_trade_marks_to_exit_bid_and_reports_spread(self):
+        from app.routers.trades import _attach_live_trade_marks
+
+        trade = {
+            "direction": "no",
+            "entry_price": 0.28,
+            "contracts": 3,
+            "current_yes_price": 0.29,
+            "no_bid": 0.70,
+            "no_ask": 0.72,
+        }
+
+        _attach_live_trade_marks(trade)
+
+        self.assertEqual(trade["entry_side_price"], 0.72)
+        self.assertEqual(trade["current_price"], 0.70)
+        self.assertEqual(trade["mark_price_type"], "exit_bid")
+        self.assertAlmostEqual(trade["current_spread"], 0.02, places=4)
+        self.assertAlmostEqual(trade["spread_mark_cost"], 0.06, places=4)
+        self.assertAlmostEqual(trade["unrealized_pnl"], -0.06, places=4)
+
+    def test_learning_override_respects_recommendation_blockers(self):
+        from fastapi import HTTPException
+        from app.routers.alerts import _validate_learning_override
+
+        with self.assertRaises(HTTPException) as ctx:
+            _validate_learning_override(
+                {"phantom_risk_level": "none"},
+                {
+                    "side_edge": 0.20,
+                    "expected_value_per_contract": 0.20,
+                    "blockers": ["yes blocked (0% accuracy on real settlements)"],
+                },
+            )
+
+        self.assertIn("yes blocked", ctx.exception.detail)
 
     def test_no_exit_recommendation_does_not_readd_default_exits(self):
         from app.services.order_manager import recommendation_exit_args
@@ -650,6 +709,45 @@ class TestPaperEntryPricing(unittest.TestCase):
         self.assertIsNone(args["take_profit_pct"])
         self.assertIsNone(args["stop_loss_price"])
         self.assertIsNone(args["take_profit_price"])
+
+    def test_live_price_refresh_checks_open_trade_without_exit_thresholds(self):
+        from app.database import init_db, get_conn
+
+        db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        db_path = db_file.name
+        db_file.close()
+        os.environ["DB_PATH"] = db_path
+        init_db()
+        try:
+            conn = get_conn()
+            conn.execute(
+                """INSERT INTO trades
+                   (market_ticker, direction, entry_price, contracts, paper, status, entry_time)
+                   VALUES ('KXHIGHTEST-26APR30-B51', 'no', 0.28, 3, 1, 'open', datetime('now'))"""
+            )
+            conn.commit()
+            conn.close()
+
+            with patch(
+                "app.services.trade_lifecycle._refresh_trade_quote",
+                return_value={
+                    "market_status": "open",
+                    "market_price": 0.29,
+                    "yes_bid": 0.28,
+                    "yes_ask": 0.30,
+                    "no_bid": 0.70,
+                    "no_ask": 0.72,
+                },
+            ) as refresh_quote:
+                from app.services.trade_lifecycle import check_live_prices
+
+                result = check_live_prices()
+
+            self.assertEqual(result["checked"], 1)
+            self.assertEqual(result["closed"], 0)
+            refresh_quote.assert_called_once_with("KXHIGHTEST-26APR30-B51")
+        finally:
+            os.unlink(db_path)
 
 class TestAutoEntryExecutionGates(unittest.TestCase):
     def setUp(self):

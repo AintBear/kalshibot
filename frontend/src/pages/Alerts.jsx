@@ -164,9 +164,10 @@ function tradeTier(a, rec = recommendation(a), brain = a.details?.brain || {}) {
 function manualPaperEligible(a, rec = recommendation(a)) {
   const phantom = a.phantom_risk_level || a.details?.phantom_risk_level || 'none'
   const blocked = a.event_has_open_trade || a.details?.event_has_open_trade
+  const blockers = rec.blockers || []
   const edge = Number(rec.side_edge ?? opportunityEdge(a) ?? 0)
   const ev = Number(rec.expected_value_per_contract ?? edge)
-  return a.status === 'pending' && !blocked && phantom !== 'high' && edge > 0 && ev > 0
+  return a.status === 'pending' && !blockers.length && !blocked && phantom !== 'high' && edge > 0 && ev > 0
 }
 
 function tierLabel(tier, rec = {}) {
@@ -812,7 +813,7 @@ function BestTradePanel({ alert }) {
 function ActiveTradesBar() {
   const [trades, setTrades] = useState([])
   useEffect(() => {
-    const load = () => fetch('/api/trades?status=open&limit=80').then(r => r.json())
+    const load = () => fetch('/api/trades?status=open&limit=80&refresh=1').then(r => r.json())
       .then(d => setTrades(d.trades || [])).catch(() => {})
     load()
     const id = setInterval(load, 15000)
@@ -837,12 +838,15 @@ function ActiveTradesBar() {
           const { city, rest } = humanizeMarketParts(t.market_ticker, t.market_title)
           const label = city || rest || 'Weather market'
           const pnl = Number(t.unrealized_pnl || 0)
+          const spreadCost = Number(t.spread_mark_cost || 0)
+          const spreadOnly = pnl < 0 && spreadCost > 0 && Math.abs(pnl) <= spreadCost + 0.01
           return (
             <span key={t.id} className="active-trade-chip">
               <span style={{ color: t.direction === 'yes' ? 'var(--green)' : 'var(--red)' }}>{(t.direction||'yes').toUpperCase()}</span>
               {' '}{label}
-              <span style={{ color: 'var(--text-muted)' }}> @ {fmtPct(t.current_price ?? (t.direction === 'no' ? 1 - Number(t.entry_price || 0) : Number(t.entry_price || 0)), 0)}</span>
+              <span style={{ color: 'var(--text-muted)' }}> bid {fmtPct(t.current_price ?? (t.direction === 'no' ? 1 - Number(t.entry_price || 0) : Number(t.entry_price || 0)), 0)}</span>
               <span style={{ color: pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>{pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}</span>
+              {spreadOnly && <span style={{ color: 'var(--text-muted)' }}>spread</span>}
             </span>
           )
         })}
