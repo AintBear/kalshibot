@@ -36,6 +36,13 @@ def _check_scan() -> Optional[str]:
     8 and 9).
     """
     try:
+        from app import config as cfg
+        if not bool(cfg.load().get("automation_enabled", False)):
+            return None
+    except Exception:
+        return "config_unavailable"
+
+    try:
         from app.services.scanner import get_scan_status  # local import to dodge circulars
     except Exception:
         return None

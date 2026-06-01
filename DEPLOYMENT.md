@@ -56,25 +56,27 @@ fly auth login
 fly launch --copy-config --no-deploy
 #    when prompted: app name = sibylla-kalshibot (or another unused name),
 #    region = iad (or whichever is closest to you).
+APP="$(grep -E '^app *= *' fly.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
 
 # 3. Create the two persistent volumes
-fly volumes create sibylla_data   --region iad --size 1
-fly volumes create sibylla_config --region iad --size 1
+fly volumes create sibylla_data   --region iad --size 1 --app "$APP"
+fly volumes create sibylla_config --region iad --size 1 --app "$APP"
 
 # 4. First deploy — this builds the image and starts the machine.
-#    Health will fail until step 5 because /app/config/settings.json is empty.
-fly deploy
+#    With no uploaded settings yet, automation is off by default.
+fly deploy --app "$APP"
 
 # 5. Upload your live settings + RSA key into the persistent config volume.
 #    These never leave the machine and are NOT stored as fly secrets.
-scripts/fly-bootstrap-secrets.sh
+scripts/fly-bootstrap-secrets.sh "$APP"
 
-# 6. Restart so the new settings take effect
-fly machine restart --app sibylla-kalshibot
+# 6. Restart so the real settings take effect. The scheduler will run a scan
+#    after startup when automation_enabled=true.
+fly machine restart --app "$APP"
 
 # 7. Verify
-curl https://sibylla-kalshibot.fly.dev/health
-curl https://sibylla-kalshibot.fly.dev/api/brain/status | jq '.score, .score_breakdown.biggest_gap'
+curl "https://${APP}.fly.dev/health"
+curl "https://${APP}.fly.dev/api/brain/status" | jq '.score, .score_breakdown.biggest_gap'
 ```
 
 ### Day-2 deploys
@@ -126,7 +128,8 @@ fly volumes destroy sibylla_config --yes
 - **Never paste the RSA private key into a chat or commit it.** Put the
   PEM file at `config/kalshi_private_key.pem` locally and let
   `fly-bootstrap-secrets.sh` upload it via SFTP. The repo's `.gitignore`
-  excludes `*.pem` and `config/kalshi_private_key.pem` explicitly.
+  and `.dockerignore` exclude `*.pem`, local settings, and `data/`
+  explicitly so neither Git nor Docker/Fly build context receives them.
 - **Live trading stays gated by `paper_trading: false` in settings.json,
   brain score ≥ 90, and `entry_quality_ok = true`.** The deployment doesn't
   change any of this — flipping live mode is a separate, deliberate edit

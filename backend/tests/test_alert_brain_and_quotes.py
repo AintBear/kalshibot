@@ -412,6 +412,34 @@ class TestPositionSizingTiers(unittest.TestCase):
 
         self.assertIn("wide bid/ask spread", rec["blockers"])
 
+    def test_recommendation_blocks_thin_market_when_volume_floor_enabled(self):
+        from app.services.position_sizing import recommend_alert
+
+        rec = recommend_alert(
+            {
+                "direction": "no",
+                "market_price": 0.18,
+                "model_prob": 0.08,
+                "no_bid": 0.80,
+                "no_ask": 0.82,
+                "brain_score": 90,
+                "brain_state": "paper_ready",
+                "confidence": 0.70,
+                "details": {
+                    "volume_24h": 12,
+                    "brain": {
+                        "score": 90,
+                        "state": "paper_ready",
+                        "learned": {"trade_count": 10, "positive_clv_rate": 0.60, "recent_avg_clv": 0.03},
+                    },
+                },
+            },
+            {"paper_starting_balance": 500, "min_volume_24h": 25},
+        )
+
+        self.assertTrue(any("thin market" in blocker for blocker in rec["blockers"]))
+        self.assertEqual(rec["contracts"], 0)
+
     def test_bad_paper_segment_still_allows_contracts(self):
         from app.services.position_sizing import recommend_alert
 

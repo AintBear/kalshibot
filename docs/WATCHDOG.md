@@ -6,8 +6,9 @@ It does not enable live trading.
 Every five minutes it:
 
 - starts Docker Compose services if they are down
-- restarts the backend when `/health` fails
-- restarts the backend when a scan appears stuck
+- restarts the backend when `/health` shows a backend/database failure
+- classifies scan-related `/health` degradation through the scan decision path
+- restarts the backend when a scan appears stuck or has a high series-error rate
 - triggers a fresh scan when the last scan is stale
 - pokes paper auto-entry after a completed scan when paper auto is enabled and the backend says it is ready
 
@@ -76,5 +77,7 @@ Override these with environment variables if needed:
 KALSHIBOT_BACKEND_URL=http://127.0.0.1:8000
 KALSHIBOT_MAX_SCAN_AGE_MIN=45
 KALSHIBOT_MAX_RUNNING_SCAN_MIN=20
+KALSHIBOT_SCAN_ERROR_RATE_THRESHOLD=0.25
+KALSHIBOT_SCAN_RESTART_COOLDOWN_MIN=20
 KALSHIBOT_WATCHDOG_INTERVAL_SECONDS=300
 ```
