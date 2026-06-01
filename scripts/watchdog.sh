@@ -7,6 +7,7 @@ REPO_DIR="${KALSHIBOT_REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BACKEND_URL="${KALSHIBOT_BACKEND_URL:-http://127.0.0.1:8000}"
 MAX_SCAN_AGE_MIN="${KALSHIBOT_MAX_SCAN_AGE_MIN:-45}"
 MAX_RUNNING_SCAN_MIN="${KALSHIBOT_MAX_RUNNING_SCAN_MIN:-20}"
+SCAN_ERROR_RATE_THRESHOLD="${KALSHIBOT_SCAN_ERROR_RATE_THRESHOLD:-0.25}"
 LOG_DIR="${KALSHIBOT_WATCHDOG_LOG_DIR:-$REPO_DIR/logs}"
 DRY_RUN=0
 
@@ -85,7 +86,7 @@ health_ok() {
 
 scan_decision() {
   local payload="$1"
-  SCAN_STATUS_JSON="$payload" python3 - "$MAX_SCAN_AGE_MIN" "$MAX_RUNNING_SCAN_MIN" <<'PY'
+  SCAN_STATUS_JSON="$payload" python3 - "$MAX_SCAN_AGE_MIN" "$MAX_RUNNING_SCAN_MIN" "$SCAN_ERROR_RATE_THRESHOLD" <<'PY'
 import os
 import json
 import sys
@@ -93,6 +94,7 @@ from datetime import datetime, timezone
 
 max_age_min = int(sys.argv[1])
 max_running_min = int(sys.argv[2])
+error_rate_threshold = float(sys.argv[3])
 try:
     data = json.loads(os.environ.get("SCAN_STATUS_JSON", ""))
 except Exception:
@@ -126,12 +128,22 @@ if status == "running":
     raise SystemExit(0)
 
 completed = parse_time(data.get("completed_at"))
+series_total = int(data.get("series_total") or 0)
+series_errors = int(data.get("series_errors") or 0)
+markets_processed = int(data.get("markets_processed") or 0)
+error_rate = (series_errors / series_total) if series_total > 0 else 0.0
+
 if not completed:
     print("scan_missing")
 elif (now - completed).total_seconds() > max_age_min * 60:
     print("scan_stale")
-elif int(data.get("series_errors") or 0) > 0 and int(data.get("markets_processed") or 0) == 0:
+elif series_errors > 0 and markets_processed == 0:
     print("scan_failed")
+elif series_total > 0 and error_rate >= error_rate_threshold:
+    # Lots of series errored even though some markets came back. Usually a
+    # process-resident DNS cache (session 8) or virtiofs corruption
+    # (session 9) — re-triggering the scan won't help, we need a restart.
+    print("scan_high_error_rate")
 else:
     print("scan_ok")
 PY
@@ -202,8 +214,8 @@ main() {
   log "Scan decision: $decision"
 
   case "$decision" in
-    scan_stuck)
-      log "Scan appears stuck; restarting backend"
+    scan_stuck|scan_high_error_rate)
+      log "Scan unhealthy ($decision); restarting backend"
       restart_backend
       poke_auto_entry=0
       ;;

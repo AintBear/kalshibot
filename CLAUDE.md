@@ -1,12 +1,13 @@
 # KalshiBot - Project Instructions
 
-## Bot Status (updated 2026-05-29, session 13 — verified from DB/runtime)
+## Bot Status (updated 2026-06-01, session 14 — verified from live API + DB)
 
-**Overall realized P&L: -$76.36** on 567 real `market_closed` settlements | **Strategy zone P&L: +$25.61** on 256 NO 20-40c bracket trades (blocked cities + explore excluded) | **77 open paper trades** (47 strategy, 30 legacy explore) | **Brain score: 71**
+**Overall realized P&L: -$75.92** on 655 real `market_closed` settlements | **Strategy zone P&L: +$23.51** on 310 NO 20-40c bracket trades (blocked cities + explore excluded) | **30 open paper trades** | **Brain score: 82** (still below 90 live gate) | **Recent-30 expectancy: -$0.54 / -0.57c CLV (entry_quality_ok=false)**
 
 ### What's actually true
 
-- The bot is running from `/Users/AintBear/Projects/kalshibot` with a launchd watchdog installed. Latest verified scan processed 539/539 markets with 0 series errors. Watchdog last exit code was 0 and live auto remains off.
+- The bot is running from `/Users/AintBear/Projects/kalshibot` with a launchd watchdog installed. Latest verified scan processed **535/535 markets with 0 series errors, 345 alerts, 30 paper trades created**. Watchdog last exit code 0. Live auto remains off (`live_blocker: "paper trading is still on"`).
+- Codex's session-11 handoff snapshot showed `markets_found=4 / series_errors=62` — that was a transient DNS/Kalshi blip that auto-recovered on the next 15-minute scheduled scan. Verified by direct `/api/scan/diagnose?series=KXHIGHNY` returning 200 from both Kalshi base URLs.
 - New paper entries are strict-strategy only. `paper_learning_explore_enabled` is now false in the local runtime and in `config/settings.example.json`; the 30 open explore trades are legacy held-out diagnostics and should not affect strategy learning.
 - Manual paper clicks now force a live Kalshi quote refresh before writing a paper fill. Open paper marks refresh all open paper trades, not only trades with stop/target exits. UI marks open positions at the exit bid and labels spread cost explicitly.
 - Manual learning override no longer bypasses recommendation blockers. YES blockers, no sub-20c blockers, no 85c+ blockers, and other strategy blockers stay active even when the user clicks a manual paper button.
@@ -45,6 +46,22 @@ Each session, do exactly two things from this priority list (top = highest impac
 5. **Infrastructure** — Tests, monitoring, deployment reliability.
 
 After each session, update the status table above and note what changed.
+
+## What Was Done (2026-06-01, session 14 — Claude/Opus)
+
+- **Verified Codex's session 11-13 work end-to-end against live runtime.** All claims hold: paper-only, brain 82 (was 71 at session 13 — climbed since), 30 open paper trades (was 77 — opens cleared cleanly), recent-30 expectancy still negative, entry_quality_ok=false, live auto off. Settlements grew from 567 → 655 in the intervening 3 days with the strategy-zone P&L holding positive (+$23.51 on 310 trades, 74.8% accuracy).
+- **Hardened `backend/app/routers/health.py`.** Codex's handoff flagged that `/health` returned `ok` even when the scanner had 62 series errors. The endpoint now also checks scan freshness (>45min stale → degraded), running-scan stuck (>20min → degraded), all-series-failed (→ degraded), and **scan error rate ≥ 25% of series total** (→ degraded). All four return HTTP 503 so Docker's `curl -f` healthcheck and the launchd watchdog both see the failure.
+- **Tightened `scripts/watchdog.sh`.** Added `scan_high_error_rate` decision (matching the new health threshold). Routed both `scan_stuck` and `scan_high_error_rate` to **backend restart**, not just a scan re-trigger — the failure mode in sessions 8 and 9 was stuck DNS / virtiofs corruption inside the long-running uvicorn process, and only a restart fixes it. Smoke-tested decision function against Codex's failure scenario (62/62 errors + 4 markets) and against synthetic 25% / all-failed cases.
+- **Replaced stale `README.md` portfolio numbers.** Header table was still claiming "566 settled / 0 open / +$30.79 strategy / 77.1% accuracy" from session 9. Replaced with verified live values, a `Mode: paper only` row, an explicit `Recent-30 expectancy is failing → live gate off` row, and a new `Safeguards` section that enumerates every iron-law and soft blocker so anyone reading the GitHub can see the live gate is on by design.
+- **Documented always-on deployment options honestly.** README now lists three paths in reliability order: (1) small VPS as the recommended serious option, (2) Windows + WSL2 + Task Scheduler, (3) the current macOS watchdog setup, with explicit acknowledgment that a sleeping Mac is a dead bot.
+- **Did not change.** Strategy blockers, sigma, calibration, brain scoring, automation cadence, settlement logic, manual-override enforcement. Codex's session 10-13 work covers those and I didn't see evidence the bot was wrong about any of them. The only mismatch CLAUDE.md→reality I noticed (AccuWeather "expired" doc vs `accuweather_cache.status=live` runtime) is benign — the cache is live, the system already falls back when it isn't, and Codex's session-13 status row correctly says `NWS + Open-Meteo + AccuW`.
+- **What I did NOT verify forward.** The strategy-zone +$23.51 / 74.8% slice is still based on a mix of historical and recent settlements. Recent-30 P&L is -$0.54, recent-30 CLV is -0.57c. That gap is the reason `entry_quality_ok` stays false. Do not raise that flag artificially — it's the only thing keeping the live gate honest.
+
+### Codex handoff items still pending (for next session)
+
+- **Move runtime off the Mac.** Codex flagged this and I agree it's now the top infra risk. While SQLite is the DB, exactly one backend replica runs. A small VPS with a persistent volume mounting `/app/data` and `/app/config` is the cleanest answer. Cost: ~$5/mo.
+- **Calibration coverage.** Isotonic is at identity because 82.8% of raw probabilities sit in one 0.1 bucket. Need wider input spread before the calibration layer can do real work. Codex session 11 already prevented the buggy global rebuild — leaving identity is the right move for now.
+- **Forward-validate the 30 strategy entries from the latest scan.** Wait for settlement before relaxing any blockers.
 
 ## What Was Done (2026-05-29, session 13 — Codex)
 
