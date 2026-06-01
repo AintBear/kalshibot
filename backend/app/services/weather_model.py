@@ -987,7 +987,19 @@ def score_market(
 
     forecast = _merge_forecasts(forecast_temps, accuweather_temps, open_meteo_temps)
 
-    model_prob = _estimate_model_prob(ticker, market_price, forecast, segment, market)
+    observed = None
+    if lat and lon and target_date and segment != "precipitation":
+        try:
+            from app.services import intraday_temps  # local import to avoid cycles
+            observed = intraday_temps.get_observed_extremes(lat, lon, target_date)
+        except Exception as exc:
+            logger.warning("intraday_temps lookup failed for %s: %s", ticker, exc)
+            observed = None
+
+    raw_forecast_prob = _estimate_model_prob(ticker, market_price, forecast, segment, market)
+    model_prob = _estimate_model_prob(
+        ticker, market_price, forecast, segment, market, observed=observed
+    )
     if model_prob is None:
         return None
     raw_model_prob = model_prob
@@ -1035,6 +1047,8 @@ def score_market(
         "phantom_risk_flags": json.dumps(phantom["flags"]),
         "phantom_risk_level": phantom["level"],
         "raw_model_prob": round(raw_model_prob, 4),
+        "raw_forecast_prob": round(raw_forecast_prob, 4) if raw_forecast_prob is not None else None,
+        "intraday_observation": observed,
         "calibration": calibration,
         "scored_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -1295,6 +1309,7 @@ def _estimate_model_prob(
     forecast: dict,
     segment: str,
     market: Optional[dict] = None,
+    observed: Optional[dict] = None,
 ) -> Optional[float]:
     t = ticker.upper()
 
@@ -1317,11 +1332,11 @@ def _estimate_model_prob(
 
     if "HIGH" in t and high is not None:
         sigma = _adaptive_sigma(9.0, hours, forecast)
-        return _temp_market_prob(high, ticker, market, sigma=sigma)
+        return _temp_market_prob(high, ticker, market, sigma=sigma, observed=observed)
 
     if "LOW" in t and low is not None:
         sigma = _adaptive_sigma(8.0, hours, forecast)
-        return _temp_market_prob(low, ticker, market, sigma=sigma)
+        return _temp_market_prob(low, ticker, market, sigma=sigma, observed=observed)
 
     return None
 
@@ -1408,7 +1423,13 @@ def update_model_calibration() -> dict:
     return {"updated": updated, "skipped_segments": skipped, "segments_seen": len(groups)}
 
 
-def _temp_market_prob(forecast: float, ticker: str, market: Optional[dict], sigma: float) -> Optional[float]:
+def _temp_market_prob(
+    forecast: float,
+    ticker: str,
+    market: Optional[dict],
+    sigma: float,
+    observed: Optional[dict] = None,
+) -> Optional[float]:
     # Hard cap: never claim more than 92% certainty on a single-day settlement.
     # Station-vs-gridpoint variance and same-day surprises mean true confidence
     # almost never exceeds this — values above look fabricated and inflate edges.
@@ -1420,17 +1441,112 @@ def _temp_market_prob(forecast: float, ticker: str, market: Optional[dict], sigm
         lower = float(floor) - 0.5
         upper = float(cap) + 0.5
         raw = _normal_cdf(upper, forecast, sigma) - _normal_cdf(lower, forecast, sigma)
-        return round(max(0.0, min(MAX_PROB, raw)), 4)
+        prob = round(max(0.0, min(MAX_PROB, raw)), 4)
+        return _apply_intraday_observation(
+            prob, ticker, "between", lower, upper, observed, MIN_PROB, MAX_PROB
+        )
     if strike_type == "greater" and floor is not None:
         raw = 1.0 - _normal_cdf(float(floor) + 0.5, forecast, sigma)
-        return round(max(MIN_PROB, min(MAX_PROB, raw)), 4)
+        prob = round(max(MIN_PROB, min(MAX_PROB, raw)), 4)
+        return _apply_intraday_observation(
+            prob, ticker, "greater", float(floor), None, observed, MIN_PROB, MAX_PROB
+        )
     if strike_type == "less" and cap is not None:
         raw = _normal_cdf(float(cap) - 0.5, forecast, sigma)
-        return round(max(MIN_PROB, min(MAX_PROB, raw)), 4)
+        prob = round(max(MIN_PROB, min(MAX_PROB, raw)), 4)
+        return _apply_intraday_observation(
+            prob, ticker, "less", None, float(cap), observed, MIN_PROB, MAX_PROB
+        )
 
     threshold = _extract_threshold(ticker, default=forecast)
     prob = _temp_exceed_prob(forecast, threshold, sigma=sigma)
     return round(max(MIN_PROB, min(MAX_PROB, prob)), 4)
+
+
+# Time-of-day weighting for intraday observation confidence. Highs typically
+# peak between 14:00 and 17:00 local; lows typically set between 04:00 and
+# 07:00 local. After those windows the observed extreme is essentially final.
+_HIGH_CONFIDENT_HOUR = 17  # after 5pm local, observed_high is near-final
+_HIGH_PARTIAL_HOUR = 14    # 2-5pm: observation is meaningful but climb may continue
+_LOW_CONFIDENT_HOUR = 10   # after 10am local, observed_low is essentially final
+
+
+def _apply_intraday_observation(
+    prob: float,
+    ticker: str,
+    strike_type: str,
+    floor: Optional[float],
+    cap: Optional[float],
+    observed: Optional[dict],
+    min_prob: float,
+    max_prob: float,
+) -> float:
+    """Sharpen the forecast probability with the city's observed extremes.
+
+    The bot was previously forecast-blind — it would happily bet against a
+    HIGH bracket the city had already exceeded by hours of trading. This
+    function lets observations override the forecast when they make the
+    market resolution near-certain. Forecast-only mode is preserved when
+    ``observed`` is missing or unavailable.
+    """
+    if not observed or not observed.get("available"):
+        return prob
+
+    upper = (ticker or "").upper()
+    is_high = "HIGH" in upper
+    is_low = "LOW" in upper
+    observed_high = observed.get("observed_high")
+    observed_low = observed.get("observed_low")
+    hour = observed.get("local_hour")
+
+    if is_high and observed_high is not None:
+        # HIGH market: today's actual high cannot fall below observed_high.
+        if strike_type == "between" and cap is not None:
+            if observed_high > float(cap):
+                # Bracket ceiling already exceeded → YES is impossible.
+                return round(min_prob, 4)
+            if hour is not None and hour >= _HIGH_CONFIDENT_HOUR:
+                if floor is not None and observed_high < float(floor):
+                    # Late in the day and still below the bracket floor.
+                    # Unlikely to climb into the bracket overnight.
+                    return round(min_prob, 4)
+                if floor is not None and float(floor) <= observed_high <= float(cap):
+                    # Late and already inside bracket → very likely to stay.
+                    return round(max(prob, max_prob * 0.9), 4)
+        elif strike_type == "greater" and floor is not None:
+            if observed_high > float(floor):
+                # High already cleared the strike → YES near-certain.
+                return round(max_prob, 4)
+            if hour is not None and hour >= _HIGH_CONFIDENT_HOUR and observed_high < float(floor):
+                return round(min_prob, 4)
+        elif strike_type == "less" and cap is not None:
+            if observed_high > float(cap):
+                return round(min_prob, 4)
+
+    if is_low and observed_low is not None:
+        # LOW market: today's actual low cannot rise above observed_low.
+        if strike_type == "between" and floor is not None:
+            if observed_low < float(floor):
+                # Already below bracket floor → final low will be ≤ observed,
+                # which is below floor, so bracket cannot contain it.
+                return round(min_prob, 4)
+            if hour is not None and hour >= _LOW_CONFIDENT_HOUR:
+                if cap is not None and observed_low > float(cap):
+                    # Late morning and still above bracket ceiling.
+                    return round(min_prob, 4)
+                if cap is not None and float(floor) <= observed_low <= float(cap):
+                    return round(max(prob, max_prob * 0.9), 4)
+        elif strike_type == "less" and cap is not None:
+            if observed_low < float(cap):
+                # LOW < strike, already cleared → YES near-certain.
+                return round(max_prob, 4)
+            if hour is not None and hour >= _LOW_CONFIDENT_HOUR and observed_low > float(cap):
+                return round(min_prob, 4)
+        elif strike_type == "greater" and floor is not None:
+            if observed_low < float(floor):
+                return round(min_prob, 4)
+
+    return prob
 
 
 def _extract_strike(market: Optional[dict], ticker: str) -> tuple[Optional[str], Optional[float], Optional[float]]:

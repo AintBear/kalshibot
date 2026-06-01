@@ -1,8 +1,10 @@
 # KalshiBot - Project Instructions
 
-## Bot Status (updated 2026-06-01, session 14 — verified from live API + DB)
+## Bot Status (updated 2026-06-01, session 15 — verified from live API + DB)
 
 **Overall realized P&L: -$75.92** on 655 real `market_closed` settlements | **Strategy zone P&L: +$23.51** on 310 NO 20-40c bracket trades (blocked cities + explore excluded) | **30 open paper trades** | **Brain score: 82** (still below 90 live gate) | **Recent-30 expectancy: -$0.54 / -0.57c CLV (entry_quality_ok=false)**
+
+**Session 15 just shipped two CLV-recovery changes:** (1) paper fills now use midpoint instead of ask — should claw back 1–5¢ per fill on any spread > 1¢. (2) intraday temperature observations now feed the model — bot no longer bets against HIGH brackets the city already exceeded by mid-afternoon. Forward-validation pending; need 30+ new settlements under these rules to confirm CLV turns positive.
 
 ### What's actually true
 
@@ -46,6 +48,37 @@ Each session, do exactly two things from this priority list (top = highest impac
 5. **Infrastructure** — Tests, monitoring, deployment reliability.
 
 After each session, update the status table above and note what changed.
+
+## What Was Done (2026-06-01, session 15 — Claude/Opus)
+
+The user pushed back on the session-14 "just wait for settlements" answer and was right to. Recent-30 expectancy is negative because the bot is **paying the spread on every fill** and is **forecast-blind**. Both are fixable engineering, not patience problems.
+
+### What changed
+
+- **Fill model switched from ask to midpoint for paper.** `backend/app/services/position_sizing.py` `_entry_prices()` now accepts a `fill_model` of `"ask" | "midpoint" | "bid_plus_1c"` and the paper default is now `midpoint`. New setting `paper_fill_model` (default `midpoint`) and `live_fill_model` (default `ask` until live limit-order plumbing exists). Recommendation result now carries `fill_model`, `side_bid`, `side_ask` so trades can be sliced by fill model later. Verified against live alerts: on a 12¢-spread market entry moved from 0.37 → 0.31 (midpoint) → 0.26 (bid+1c). On a 1¢-spread market all three converge — no false improvement.
+- **Wide-spread blocker now applies to paper too.** Was previously live-only at 15¢; paper would happily enter 50¢-spread markets and pay the ask. No fill model survives a 50¢ spread.
+- **Intraday temperature injection (`backend/app/services/intraday_temps.py`).** New module fetches today's hourly observed temps from Open-Meteo (free, no key), computes `observed_high_so_far` / `observed_low_so_far` / `current_temp` / `local_hour`, caches per (lat, lon, date) for 10 minutes. `weather_model.score_market` now calls it for non-precipitation markets and passes the observation through to `_temp_market_prob`.
+- **Conservative observation override (`_apply_intraday_observation`).** Fires only when the signal is iron-clad: bracket already exceeded → near-zero; threshold already cleared → near-certain; late-day-and-inside-bracket → boosted to 0.83. Otherwise leaves the forecast probability untouched. Late = local hour ≥ 17 for HIGH, ≥ 10 for LOW. Verified live: Chicago observed 72° vs forecast 69.8° at 14:00 — no override yet (correct, still mid-afternoon).
+- **`raw_forecast_prob` + `intraday_observation` exposed on the scored result** so the UI and audit queries can see exactly when the observation moved the model.
+- **12 new tests** (`test_intraday_temps.py` + 5 fill-model tests in `test_alert_brain_and_quotes.py`). Existing `test_recommendation_uses_side_ask_for_no_entry` updated to reflect the new midpoint default; the original ask-mode behavior is preserved by passing `paper_fill_model: "ask"`.
+- **129/129 tests pass.**
+
+### What this should fix
+
+CLV is recent-30 −0.57¢. About 1–4¢ of that is bot paying the ask instead of working a limit. Switching to midpoint should add roughly 1–5¢ of side-edge per filled trade depending on spread, which directly improves the recent-window expectancy gate. The intraday observation override won't fire on most trades but will save the bot from entering NO on a HIGH bracket the city already cleared by mid-afternoon — those were the worst-CLV losers because they were essentially already resolved against us.
+
+### What this does NOT fix
+
+- Paper-midpoint fills are an **optimistic** simulation of live limit orders. Real live mode still needs an order-management layer in `order_manager.py` that posts at bid+1¢, cancels/re-posts as quotes move, and crosses if the alert is about to expire. That work is queued as task #10 follow-up.
+- Intraday override is binary on the iron-clad cases. The softer case — observation suggests the forecast is too low/high — is not modeled because the right adjustment depends on diurnal headroom estimates we don't have yet.
+- AccuWeather is still in the code path. CLAUDE.md sessions 7/13 are inconsistent about its status; runtime shows `accuweather_cache.status=live` so it's working but the system already falls back to NWS + Open-Meteo when it isn't.
+
+### Deferred (saved as TaskCreate IDs #6-#9)
+
+- Slice-aware calibration (per city + segment) — replace the global isotonic guard with a slice table.
+- Add ECMWF as 3rd weather source — Open-Meteo serves it free; would give real source-disagreement signal.
+- Liquidity floor — skip markets with low open interest before the spread/edge check.
+- Brain score 82-vs-90 gap audit — identify which component prevents the live gate and whether the gap is real.
 
 ## What Was Done (2026-06-01, session 14 — Claude/Opus)
 
