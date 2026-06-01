@@ -14,6 +14,7 @@ _EDITABLE = {
     "paper_learning_min_confidence", "paper_learning_max_contracts",
     "paper_learning_explore_enabled", "paper_learning_explore_max_per_scan",
     "paper_learning_explore_max_open",
+    "paper_fill_model", "live_fill_model",
     "daily_loss_limit_paper", "weekly_loss_limit_paper",
     "scan_interval_minutes", "stale_alert_expiry_minutes",
     "kalshi_key_id", "kalshi_private_key_path",

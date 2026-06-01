@@ -468,17 +468,16 @@ def _quote_value(alert: dict, details: dict, field: str) -> Optional[float]:
 
 
 FILL_MODELS = ("ask", "midpoint", "bid_plus_1c")
-DEFAULT_PAPER_FILL_MODEL = "midpoint"
-DEFAULT_LIVE_FILL_MODEL = "ask"
+DEFAULT_PAPER_FILL_MODEL = "bid_plus_1c"
+DEFAULT_LIVE_FILL_MODEL = "bid_plus_1c"
 
 
 def _resolve_fill_model(settings: dict, is_paper: bool) -> str:
     """Pick the entry-fill model.
 
-    Paper mode defaults to ``midpoint`` because the bot was historically
-    entering at the ask and bleeding the spread (-0.57c recent CLV). For
-    live mode we still default to ``ask`` so we never simulate fills that
-    we have not actually built order plumbing for.
+    Paper and live mode default to ``bid_plus_1c`` so entries model passive
+    limits instead of crossing the spread. Use ``midpoint`` only when faster
+    paper sampling matters more than conservative queue realism.
     """
     if is_paper:
         key = "paper_fill_model"
@@ -515,7 +514,7 @@ def _apply_fill_model(bid: Optional[float], ask: Optional[float], model: str) ->
         # Post a passive bid one cent above the resting bid.
         cand = min(ask, bid + 0.01)
         return _bounded(_round_cent(cand))
-    # midpoint (default for paper). Bias 1c toward the ask on penny rounding
+    # Midpoint mode biases 1c toward the ask on penny rounding
     # so we never claim a sub-bid fill — the queue at bid still has to clear.
     mid = (bid + ask) / 2.0
     rounded = _round_cent(mid)
@@ -537,8 +536,8 @@ def _entry_prices(
 
     Trades are stored as YES-price coordinates so settlement math remains
     consistent. The historical default was ``ask`` (pay the spread on every
-    fill); the new paper default is ``midpoint`` (model a passive limit
-    order that fills near the middle of the book).
+    fill); the current default is ``bid_plus_1c`` (post a passive limit one
+    cent above the resting bid).
     """
     if direction == "no":
         bid = _quote_value(alert, details, "no_bid")

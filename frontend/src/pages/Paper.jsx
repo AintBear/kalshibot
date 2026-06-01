@@ -36,7 +36,7 @@ function ChartTip({ active, payload }) {
   )
 }
 
-function PaperEquityChart({ overview, closedTrades }) {
+function PaperEquityChart({ overview, closedTrades, closedLoading }) {
   const start = Number(overview?.paper_starting_balance ?? 500)
   const sorted = [...closedTrades]
     .filter(t => t.pnl != null && t.exit_time)
@@ -66,7 +66,9 @@ function PaperEquityChart({ overview, closedTrades }) {
         </div>
       </div>
       {data.length < 2 ? (
-        <div className="chart-empty">Equity curve starts after the first closed or live-marked paper position.</div>
+        <div className="chart-empty">
+          {closedLoading ? 'Loading closed-trade history...' : 'Equity curve starts after the first closed or live-marked paper position.'}
+        </div>
       ) : (
         <ResponsiveContainer width="100%" height={210}>
           <AreaChart data={data} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
@@ -235,41 +237,64 @@ export default function Paper() {
   const [closedTrades, setClosedTrades] = useState([])
   const [overview, setOverview] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [closedLoading, setClosedLoading] = useState(false)
+  const [loadError, setLoadError] = useState('')
   const [refreshingMarks, setRefreshingMarks] = useState(false)
+  const closedLoaded = useRef(false)
 
-  const load = useCallback((refreshMarks = false) => {
+  const applyOpenState = useCallback((alertsPayload, tradesPayload, overviewPayload) => {
+    const openTrades = tradesPayload.trades || []
+    const openEvents = new Set(openTrades.map(trade => eventKey(trade.market_ticker)))
+    const openMarkets = new Set(openTrades.map(trade => trade.market_ticker))
+    const candidates = (alertsPayload.alerts || [])
+      .filter(alert => !openMarkets.has(alert.market_ticker))
+      .filter(alert => !openEvents.has(eventKey(alert.market_ticker)))
+      .sort((x, y) => qualityScore(y) - qualityScore(x))
+    const bestByEvent = []
+    const seenEvents = new Set()
+    for (const alert of candidates) {
+      const key = eventKey(alert.market_ticker)
+      if (seenEvents.has(key)) continue
+      seenEvents.add(key)
+      bestByEvent.push(alert)
+    }
+    setAlerts(bestByEvent.slice(0, 12))
+    setTrades(openTrades.sort((x, y) => Number(y.unrealized_pnl || 0) - Number(x.unrealized_pnl || 0)))
+    setOverview(overviewPayload)
+  }, [])
+
+  const loadClosedTrades = useCallback(() => {
+    setClosedLoading(true)
+    return fetch('/api/trades?status=closed&limit=500')
+      .then(r => r.json())
+      .then(c => {
+        setClosedTrades(c.trades || [])
+        closedLoaded.current = true
+      })
+      .catch(e => setLoadError(e.message || 'Closed trade history failed to load.'))
+      .finally(() => setClosedLoading(false))
+  }, [])
+
+  const load = useCallback((refreshMarks = false, options = {}) => {
     if (refreshMarks) setRefreshingMarks(true)
     else setLoading(true)
+    setLoadError('')
     Promise.all([
       fetch('/api/alerts?status=pending&limit=60&refresh=1').then(r => r.json()),
       fetch('/api/trades?status=open&limit=120&refresh=1').then(r => r.json()),
-      fetch('/api/trades?status=closed&limit=500').then(r => r.json()),
       fetch('/api/overview').then(r => r.json()),
-    ]).then(([a, t, c, o]) => {
-      const openTrades = t.trades || []
-      const openEvents = new Set(openTrades.map(trade => eventKey(trade.market_ticker)))
-      const openMarkets = new Set(openTrades.map(trade => trade.market_ticker))
-      const candidates = (a.alerts || [])
-        .filter(alert => !openMarkets.has(alert.market_ticker))
-        .filter(alert => !openEvents.has(eventKey(alert.market_ticker)))
-        .sort((x, y) => qualityScore(y) - qualityScore(x))
-      const bestByEvent = []
-      const seenEvents = new Set()
-      for (const alert of candidates) {
-        const key = eventKey(alert.market_ticker)
-        if (seenEvents.has(key)) continue
-        seenEvents.add(key)
-        bestByEvent.push(alert)
-      }
-      setAlerts(bestByEvent.slice(0, 12))
-      setTrades(openTrades.sort((x, y) => Number(y.unrealized_pnl || 0) - Number(x.unrealized_pnl || 0)))
-      setClosedTrades(c.trades || [])
-      setOverview(o)
+    ]).then(([a, t, o]) => {
+      applyOpenState(a, t, o)
+    }).catch(e => {
+      setLoadError(e.message || 'Paper state failed to load.')
     }).finally(() => {
       setLoading(false)
       setRefreshingMarks(false)
+      if (options.loadClosed || !closedLoaded.current) {
+        loadClosedTrades()
+      }
     })
-  }, [])
+  }, [applyOpenState, loadClosedTrades])
 
   useEffect(() => {
     load()
@@ -287,7 +312,11 @@ export default function Paper() {
     setSweepResult(null)
     fetch('/api/trades/sweep-settlements', { method: 'POST' })
       .then(r => r.json())
-      .then(d => { setSweepResult(d); load() })
+      .then(d => {
+        setSweepResult(d)
+        closedLoaded.current = false
+        load(false, { loadClosed: true })
+      })
       .catch(e => setSweepResult({ error: e.message }))
       .finally(() => setSweeping(false))
   }
@@ -298,7 +327,11 @@ export default function Paper() {
     setResetResult(null)
     fetch('/api/trades/reset-paper-trades', { method: 'POST' })
       .then(r => r.json())
-      .then(d => { setResetResult(d); load() })
+      .then(d => {
+        setResetResult(d)
+        closedLoaded.current = false
+        load(false, { loadClosed: true })
+      })
       .catch(e => setResetResult({ error: e.message }))
       .finally(() => setResetting(false))
   }
@@ -343,8 +376,11 @@ export default function Paper() {
       {(sweepResult?.error || resetResult?.error) && (
         <div style={{ fontSize: '0.78rem', color: 'var(--red)', padding: '8px 12px' }}>{sweepResult?.error || resetResult?.error}</div>
       )}
+      {loadError && (
+        <div style={{ fontSize: '0.78rem', color: 'var(--red)', padding: '8px 12px' }}>{loadError}</div>
+      )}
 
-      <PaperEquityChart overview={overview} closedTrades={closedTrades} />
+      <PaperEquityChart overview={overview} closedTrades={closedTrades} closedLoading={closedLoading} />
 
       <div className="paper-grid">
         <section>
@@ -355,14 +391,16 @@ export default function Paper() {
             <div className="empty">No pending paper candidates.</div>
           ) : (
             <div className="paper-list">
-              {alerts.map(a => <AlertCandidate key={a.id} alert={a} onAction={load} />)}
+              {alerts.map(a => <AlertCandidate key={a.id} alert={a} onAction={() => load(true)} />)}
             </div>
           )}
         </section>
 
         <section>
           <div className="section-hd">Open Paper Trades ({trades.length})</div>
-          {trades.length === 0 ? (
+          {loading && trades.length === 0 ? (
+            <div className="empty">Loading open paper trades...</div>
+          ) : trades.length === 0 ? (
             <div className="empty">No open paper positions.</div>
           ) : (
             <div className="paper-list">
