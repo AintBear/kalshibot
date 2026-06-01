@@ -340,6 +340,38 @@ class TestModelCalibration(unittest.TestCase):
         self.assertEqual(result["segments_seen"], 0)
         self.assertEqual(result["updated"], 0)
 
+    def test_isotonic_rebuild_rejects_concentrated_bucket_coverage(self):
+        from app.services import weather_model
+
+        rows = [
+            {"n": 467, "avg_raw_prob": 0.12, "actual_rate": 0.36, "bucket": 0.1},
+            {"n": 30, "avg_raw_prob": 0.18, "actual_rate": 0.50, "bucket": 0.2},
+            {"n": 10, "avg_raw_prob": 0.30, "actual_rate": 0.40, "bucket": 0.3},
+            {"n": 12, "avg_raw_prob": 0.38, "actual_rate": 0.33, "bucket": 0.4},
+            {"n": 8, "avg_raw_prob": 0.49, "actual_rate": 0.50, "bucket": 0.5},
+        ]
+
+        coverage = weather_model._isotonic_coverage(rows)
+
+        self.assertFalse(coverage["usable"])
+        self.assertEqual(coverage["reason"], "concentrated_bucket_coverage")
+
+    def test_pava_isotonic_knots_are_monotonic(self):
+        from app.services import weather_model
+
+        rows = [
+            {"n": 10, "avg_raw_prob": 0.10, "actual_rate": 0.60, "bucket": 0.1},
+            {"n": 10, "avg_raw_prob": 0.20, "actual_rate": 0.20, "bucket": 0.2},
+            {"n": 10, "avg_raw_prob": 0.30, "actual_rate": 0.80, "bucket": 0.3},
+        ]
+
+        knots = weather_model._pava_isotonic_knots(rows)
+        ys = [y for _x, y in knots]
+
+        self.assertEqual(ys, sorted(ys))
+        self.assertEqual(knots[0], (0.0, 0.0))
+        self.assertEqual(knots[-1], (1.0, 1.0))
+
 
 class TestMarketAnchor(unittest.TestCase):
     def test_no_anchoring_when_close(self):
@@ -354,4 +386,3 @@ class TestMarketAnchor(unittest.TestCase):
         result = _market_anchor(0.90, 0.05)
         self.assertLess(result, 0.90)
         self.assertGreater(result, 0.05)
-

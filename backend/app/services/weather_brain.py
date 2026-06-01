@@ -252,62 +252,94 @@ def get_brain_status() -> dict:
     closed_trades = conn.execute(
         "SELECT COUNT(*) FROM trades WHERE paper=1 AND status IN ('closed','settled')"
     ).fetchone()[0]
-    _exclude = "AND COALESCE(exit_reason, '') NOT IN ('paper_reset', 'bulk_cleanup')"
-    _strategy = """AND direction = 'no'
-              AND entry_price >= 0.20 AND entry_price < 0.40
-              AND market_ticker NOT GLOB '*-T[0-9]*'"""
+    from app.services.position_sizing import BLOCKED_CITY_SEGMENTS
+    blocked_series = ", ".join(f"'{s}'" for s in sorted(BLOCKED_CITY_SEGMENTS))
+    _exclude = "AND COALESCE(t.exit_reason, '') NOT IN ('paper_reset', 'bulk_cleanup')"
+    _strategy = f"""AND t.direction = 'no'
+              AND t.entry_price >= 0.20 AND t.entry_price < 0.40
+              AND t.market_ticker NOT GLOB '*-T[0-9]*'
+              AND UPPER(substr(t.market_ticker, 1, instr(t.market_ticker, '-') - 1)) NOT IN ({blocked_series})"""
+    _strategy_mode = "AND COALESCE(json_extract(a.details, '$.learning_mode'), '') != 'explore'"
     learning_samples = conn.execute(
-        f"""SELECT COUNT(*) FROM trades
-            WHERE paper=1
-              AND clv IS NOT NULL
-              AND status IN ('closed','settled')
+        f"""SELECT COUNT(*) FROM trades t
+            LEFT JOIN alerts a ON a.id = t.alert_id
+            WHERE t.paper=1
+              AND t.clv IS NOT NULL
+              AND t.status IN ('closed','settled')
               {_exclude}
               {_strategy}
-"""
+              {_strategy_mode}
+	"""
     ).fetchone()[0]
     pending_settlement = conn.execute(
-        f"""SELECT COUNT(*) FROM trades
-            WHERE paper=1
-              AND clv IS NULL
-              AND status IN ('closed','settled')
+        f"""SELECT COUNT(*) FROM trades t
+            WHERE t.paper=1
+              AND t.clv IS NULL
+              AND t.status IN ('closed','settled')
               {_exclude}"""
     ).fetchone()[0]
     excluded_reset_trades = conn.execute(
         "SELECT COUNT(*) FROM trades WHERE paper=1 AND status IN ('closed','settled') AND exit_reason IN ('paper_reset', 'bulk_cleanup')"
     ).fetchone()[0]
+    explore_row = conn.execute(
+        """SELECT
+               SUM(CASE WHEN t.status='open' THEN 1 ELSE 0 END) AS open_n,
+               SUM(CASE WHEN t.status IN ('closed','settled') THEN 1 ELSE 0 END) AS settled_n,
+               COALESCE(SUM(CASE WHEN t.status IN ('closed','settled') THEN t.pnl ELSE 0 END), 0.0) AS pnl,
+               SUM(CASE WHEN t.status IN ('closed','settled') AND t.prediction_correct=1 THEN 1 ELSE 0 END) AS correct_n,
+               SUM(CASE WHEN t.status IN ('closed','settled') AND t.prediction_correct IS NOT NULL THEN 1 ELSE 0 END) AS pred_n
+             FROM trades t
+             LEFT JOIN alerts a ON a.id = t.alert_id
+            WHERE t.paper=1
+              AND COALESCE(json_extract(a.details, '$.learning_mode'), '') = 'explore'"""
+    ).fetchone()
+    explore_open = int(explore_row["open_n"] or 0) if explore_row else 0
+    explore_settled = int(explore_row["settled_n"] or 0) if explore_row else 0
+    explore_prediction_count = int(explore_row["pred_n"] or 0) if explore_row else 0
+    explore_correct = int(explore_row["correct_n"] or 0) if explore_row else 0
+    explore_prediction_accuracy = (
+        round(explore_correct / explore_prediction_count, 4)
+        if explore_prediction_count > 0 else 0.0
+    )
 
     clv_row = conn.execute(
-        f"""SELECT AVG(clv) FROM trades
-            WHERE paper=1
-              AND clv IS NOT NULL
-              AND status IN ('closed','settled')
+        f"""SELECT AVG(t.clv) FROM trades t
+            LEFT JOIN alerts a ON a.id = t.alert_id
+            WHERE t.paper=1
+              AND t.clv IS NOT NULL
+              AND t.status IN ('closed','settled')
               {_exclude}
               {_strategy}
-"""
+              {_strategy_mode}
+	"""
     ).fetchone()
     avg_clv = round((clv_row[0] or 0.0) * 100, 2)
 
     pnl_row = conn.execute(
         f"""SELECT COALESCE(SUM(pnl), 0.0), AVG(pnl)
-            FROM trades
-            WHERE paper=1
-              AND pnl IS NOT NULL
-              AND status IN ('closed','settled')
+            FROM trades t
+            LEFT JOIN alerts a ON a.id = t.alert_id
+            WHERE t.paper=1
+              AND t.pnl IS NOT NULL
+              AND t.status IN ('closed','settled')
               {_exclude}
               {_strategy}
-"""
+              {_strategy_mode}
+	"""
     ).fetchone()
     realized_pnl = round(float(pnl_row[0] or 0.0), 2)
     avg_pnl = round(float(pnl_row[1] or 0.0), 4)
 
     recent_row = conn.execute(
         f"""SELECT AVG(clv) FROM (
-            SELECT clv FROM trades
-             WHERE paper=1
-               AND clv IS NOT NULL
-               AND status IN ('closed','settled')
+            SELECT t.clv FROM trades t
+             LEFT JOIN alerts a ON a.id = t.alert_id
+             WHERE t.paper=1
+               AND t.clv IS NOT NULL
+               AND t.status IN ('closed','settled')
                {_exclude}
                {_strategy}
+               {_strategy_mode}
             ORDER BY exit_time DESC LIMIT 30
         )"""
     ).fetchone()
@@ -315,48 +347,57 @@ def get_brain_status() -> dict:
 
     recent_pnl_row = conn.execute(
         f"""SELECT COALESCE(SUM(pnl), 0.0) FROM (
-            SELECT pnl FROM trades
-             WHERE paper=1
-               AND pnl IS NOT NULL
-               AND status IN ('closed','settled')
+            SELECT t.pnl FROM trades t
+             LEFT JOIN alerts a ON a.id = t.alert_id
+             WHERE t.paper=1
+               AND t.pnl IS NOT NULL
+               AND t.status IN ('closed','settled')
                {_exclude}
                {_strategy}
+               {_strategy_mode}
              ORDER BY exit_time DESC LIMIT 30
         )"""
     ).fetchone()
     recent_pnl = round(float(recent_pnl_row[0] or 0.0), 2)
     recent_avg_profit_row = conn.execute(
-        """SELECT AVG(pnl) FROM (
-            SELECT pnl FROM trades
-             WHERE paper=1
-               AND pnl IS NOT NULL
-               AND status IN ('closed','settled')
-               AND COALESCE(exit_reason, '') NOT IN ('paper_reset', 'bulk_cleanup')
+        f"""SELECT AVG(pnl) FROM (
+            SELECT t.pnl FROM trades t
+             LEFT JOIN alerts a ON a.id = t.alert_id
+             WHERE t.paper=1
+               AND t.pnl IS NOT NULL
+               AND t.status IN ('closed','settled')
+               {_exclude}
+               {_strategy}
+               {_strategy_mode}
              ORDER BY exit_time DESC LIMIT 30
         )"""
     ).fetchone()
     recent_avg_profit = round(float(recent_avg_profit_row[0] or 0.0), 4)
 
     positive_clv = conn.execute(
-        f"""SELECT COUNT(*) FROM trades
-            WHERE paper=1
-              AND clv > 0
-              AND status IN ('closed','settled')
+        f"""SELECT COUNT(*) FROM trades t
+            LEFT JOIN alerts a ON a.id = t.alert_id
+            WHERE t.paper=1
+              AND t.clv > 0
+              AND t.status IN ('closed','settled')
               {_exclude}
               {_strategy}
-"""
+              {_strategy_mode}
+	"""
     ).fetchone()[0]
     positive_clv_rate = round(positive_clv / learning_samples, 4) if learning_samples > 0 else 0.0
 
     pred_row = conn.execute(
         f"""SELECT SUM(CASE WHEN prediction_correct=1 THEN 1 ELSE 0 END), COUNT(*)
-            FROM trades
-            WHERE paper=1
-              AND prediction_correct IS NOT NULL
-              AND status IN ('closed','settled')
+            FROM trades t
+            LEFT JOIN alerts a ON a.id = t.alert_id
+            WHERE t.paper=1
+              AND t.prediction_correct IS NOT NULL
+              AND t.status IN ('closed','settled')
               {_exclude}
               {_strategy}
-"""
+              {_strategy_mode}
+	"""
     ).fetchone()
     prediction_correct_count = int(pred_row[0] or 0) if pred_row else 0
     prediction_sample_count = int(pred_row[1] or 0) if pred_row else 0
@@ -364,12 +405,14 @@ def get_brain_status() -> dict:
 
     recent_pred_row = conn.execute(
         f"""SELECT SUM(CASE WHEN prediction_correct=1 THEN 1 ELSE 0 END), COUNT(*)
-           FROM (SELECT prediction_correct FROM trades
-                  WHERE paper=1
-                    AND prediction_correct IS NOT NULL
-                    AND status IN ('closed','settled')
+           FROM (SELECT t.prediction_correct FROM trades t
+                  LEFT JOIN alerts a ON a.id = t.alert_id
+                  WHERE t.paper=1
+                    AND t.prediction_correct IS NOT NULL
+                    AND t.status IN ('closed','settled')
                     {_exclude}
                     {_strategy}
+                    {_strategy_mode}
                   ORDER BY exit_time DESC LIMIT 100)"""
     ).fetchone()
     recent_pred_correct = int(recent_pred_row[0] or 0) if recent_pred_row else 0
@@ -378,12 +421,14 @@ def get_brain_status() -> dict:
 
     recent_positive_clv_row = conn.execute(
         f"""SELECT COUNT(*), SUM(CASE WHEN clv > 0 THEN 1 ELSE 0 END)
-           FROM (SELECT clv FROM trades
-                  WHERE paper=1
-                    AND clv IS NOT NULL
-                    AND status IN ('closed','settled')
+           FROM (SELECT t.clv FROM trades t
+                  LEFT JOIN alerts a ON a.id = t.alert_id
+                  WHERE t.paper=1
+                    AND t.clv IS NOT NULL
+                    AND t.status IN ('closed','settled')
                     {_exclude}
                     {_strategy}
+                    {_strategy_mode}
                   ORDER BY exit_time DESC LIMIT 100)"""
     ).fetchone()
     recent_positive_clv_total = int(recent_positive_clv_row[0] or 0)
@@ -397,7 +442,7 @@ def get_brain_status() -> dict:
                WHERE paper=1
                  AND clv IS NOT NULL
                  AND status IN ('closed','settled')
-                 AND COALESCE(exit_reason, '') != 'paper_reset'
+                 AND COALESCE(exit_reason, '') NOT IN ('paper_reset', 'bulk_cleanup')
                  AND datetime(coalesce(exit_time, entry_time, '1970-01-01')) >
                      datetime(coalesce((SELECT MAX(updated_at) FROM adaptive_segments), '1970-01-01'))
             )"""
@@ -409,10 +454,14 @@ def get_brain_status() -> dict:
         adaptive_policy.rebuild_snapshots()
 
     segments = adaptive_policy.get_all_segments()
-    auto_eligible_count = sum(1 for s in segments if s.get("auto_eligible"))
+    strategy_segments = [
+        s for s in segments
+        if not str(s.get("segment_key") or "").startswith("explore:")
+    ]
+    auto_eligible_count = sum(1 for s in strategy_segments if s.get("auto_eligible"))
     paper_auto_eligible_count = sum(
         1
-        for s in segments
+        for s in strategy_segments
         if (s.get("details") or {}).get("paper_auto_eligible")
     )
 
@@ -423,7 +472,7 @@ def get_brain_status() -> dict:
         s.get("trade_count", 0) >= 5
         and float(s.get("recent_avg_clv") or 0.0) >= 0.0
         and float(s.get("positive_clv_rate") or 0.0) >= 0.40
-        for s in segments
+        for s in strategy_segments
     )
     entry_quality_ok = learning_samples >= 20 and (
         avg_clv >= 0.0
@@ -433,12 +482,12 @@ def get_brain_status() -> dict:
     )
     learning_active = total_trades > 0 or learning_samples > 0
     lessons = []
-    for seg in segments[:4]:
+    for seg in strategy_segments[:4]:
         for lesson in (seg.get("details") or {}).get("lessons", []):
             if lesson not in lessons:
                 lessons.append(lesson)
 
-    score = _compute_brain_score(
+    score_breakdown = _compute_brain_score_breakdown(
         settled=learning_samples,
         avg_clv=avg_clv,
         recent_clv=recent_clv,
@@ -452,6 +501,7 @@ def get_brain_status() -> dict:
         recent_prediction_accuracy=recent_prediction_accuracy,
         recent_positive_clv_rate=recent_positive_clv_rate,
     )
+    score = score_breakdown["score"]
 
     from app import config as cfg
     settings = cfg.load()
@@ -461,6 +511,7 @@ def get_brain_status() -> dict:
         "readiness_label": _readiness_label(score, learning_samples, entry_quality_ok, avg_clv),
         "learning_active": learning_active,
         "score": score,
+        "score_breakdown": score_breakdown,
         "paper_trading": settings.get("paper_trading", True),
         "automation_enabled": settings.get("automation_enabled", False),
         "auto_paper_trade_enabled": settings.get("auto_paper_trade_enabled", False),
@@ -471,6 +522,14 @@ def get_brain_status() -> dict:
         "learning_samples": learning_samples,
         "pending_settlement_trades": pending_settlement,
         "excluded_reset_trades": excluded_reset_trades,
+        "explore_stats": {
+            "open_trades": explore_open,
+            "settled_trades": explore_settled,
+            "realized_pnl": round(float(explore_row["pnl"] or 0.0), 2) if explore_row else 0.0,
+            "prediction_accuracy": explore_prediction_accuracy,
+            "prediction_correct_count": explore_correct,
+            "prediction_sample_count": explore_prediction_count,
+        },
         "avg_clv": avg_clv,
         "recent_30_avg_clv": recent_clv,
         "realized_pnl_paper": realized_pnl,
@@ -531,24 +590,52 @@ def _compute_brain_score(
     recent_prediction_accuracy: float = 0.0,
     recent_positive_clv_rate: float = 0.0,
 ) -> int:
-    """Continuous brain score weighted toward recent performance.
-    Old bad trades fade out so the score reflects the bot's current ability,
-    not its historical mistakes."""
+    return _compute_brain_score_breakdown(
+        settled=settled,
+        avg_clv=avg_clv,
+        recent_clv=recent_clv,
+        positive_clv_rate=positive_clv_rate,
+        realized_pnl=realized_pnl,
+        recent_pnl=recent_pnl,
+        entry_quality_ok=entry_quality_ok,
+        auto_eligible_count=auto_eligible_count,
+        prediction_accuracy=prediction_accuracy,
+        prediction_sample_count=prediction_sample_count,
+        recent_prediction_accuracy=recent_prediction_accuracy,
+        recent_positive_clv_rate=recent_positive_clv_rate,
+    )["score"]
 
+
+def _compute_brain_score_breakdown(
+    settled: int,
+    avg_clv: float,
+    recent_clv: float,
+    positive_clv_rate: float,
+    realized_pnl: float,
+    recent_pnl: float,
+    entry_quality_ok: bool,
+    auto_eligible_count: int,
+    prediction_accuracy: float = 0.0,
+    prediction_sample_count: int = 0,
+    recent_prediction_accuracy: float = 0.0,
+    recent_positive_clv_rate: float = 0.0,
+) -> dict:
+    """Per-component subscores so the UI can answer 'what's keeping the score below 90?'.
+
+    Components and their independent maxes (sum to 100):
+      samples 10 | clv 15 | recent_clv 10 | positive_rate 15 |
+      recent_pnl 10 | segments 10 | prediction 30
+    """
     sample_score = min(10.0, settled * 0.20)
 
-    # CLV: 70% recent, 30% overall so improvements show fast
     blended_clv = recent_clv * 0.7 + avg_clv * 0.3
     clv_score = max(0.0, min(15.0, (blended_clv + 5.0) * 1.5))
 
-    # Recent CLV trend (0-10): pure recent signal
     recent_clv_score = max(0.0, min(10.0, (recent_clv + 2.0) * 2.5))
 
-    # Positive CLV rate: blend recent and overall
     blended_rate = recent_positive_clv_rate * 0.7 + positive_clv_rate * 0.3
     rate_score = max(0.0, min(15.0, (blended_rate - 0.15) * 33.33))
 
-    # P&L: recent P&L matters more than cumulative
     if recent_pnl >= 0:
         pnl_score = min(10.0, 5.0 + recent_pnl * 1.0)
     else:
@@ -556,15 +643,45 @@ def _compute_brain_score(
 
     segment_score = min(10.0, auto_eligible_count * 3.5)
 
-    # Prediction accuracy: blend recent (last 100) with overall
     if prediction_sample_count >= 10:
         blended_accuracy = recent_prediction_accuracy * 0.7 + prediction_accuracy * 0.3
         pred_score = max(0.0, min(30.0, (blended_accuracy - 0.25) * 85.71))
+        pred_detail = f"blended accuracy {blended_accuracy*100:.1f}% (max at 60%)"
     else:
         pred_score = 0.0
+        pred_detail = f"<10 prediction samples ({prediction_sample_count})"
 
-    score = sample_score + clv_score + recent_clv_score + rate_score + pnl_score + segment_score + pred_score
-    return int(round(max(0, min(100, score))))
+    components = [
+        {"name": "samples", "value": round(sample_score, 2), "max": 10.0,
+         "detail": f"{settled} settled (max at 50)"},
+        {"name": "clv", "value": round(clv_score, 2), "max": 15.0,
+         "detail": f"blended CLV {blended_clv:+.2f}c (max at +5c)"},
+        {"name": "recent_clv", "value": round(recent_clv_score, 2), "max": 10.0,
+         "detail": f"recent CLV {recent_clv:+.2f}c (max at +2c)"},
+        {"name": "positive_rate", "value": round(rate_score, 2), "max": 15.0,
+         "detail": f"blended positive rate {blended_rate*100:.1f}% (max at 60%)"},
+        {"name": "recent_pnl", "value": round(pnl_score, 2), "max": 10.0,
+         "detail": f"recent P&L ${recent_pnl:+.2f} (max at +$5)"},
+        {"name": "segments", "value": round(segment_score, 2), "max": 10.0,
+         "detail": f"{auto_eligible_count} auto-eligible segments (max at 3)"},
+        {"name": "prediction", "value": round(pred_score, 2), "max": 30.0,
+         "detail": pred_detail},
+    ]
+    for c in components:
+        c["headroom"] = round(c["max"] - c["value"], 2)
+
+    raw = sum(c["value"] for c in components)
+    score = int(round(max(0, min(100, raw))))
+
+    # Largest single source of upside — directly tells the user where to focus.
+    biggest = max(components, key=lambda c: c["headroom"])
+
+    return {
+        "score": score,
+        "raw_total": round(raw, 2),
+        "components": components,
+        "biggest_gap": {"component": biggest["name"], "headroom": biggest["headroom"], "detail": biggest["detail"]},
+    }
 
 
 def _readiness_label(score: int, settled: int, entry_quality_ok: bool, avg_clv: float = 0.0) -> str:

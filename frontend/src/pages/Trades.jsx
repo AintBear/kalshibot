@@ -90,7 +90,14 @@ function TradeCard({ trade: t }) {
         {/* P&L — the main metric */}
         <div className="trade-actions" style={{ alignItems: 'flex-end', minWidth: 90 }}>
           {isOpen ? (
-            <span className="badge badge-sky" style={{ fontSize: '0.72rem' }}>Open</span>
+            <>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: '1.22rem', fontWeight: 800, color: Number(t.unrealized_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)', lineHeight: 1 }}>
+                {fmtMoney(Number(t.unrealized_pnl || 0))}
+              </span>
+              <span style={{ color: 'var(--text-muted)', fontSize: '0.56rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em', marginTop: 3 }}>
+                Bid Mark
+              </span>
+            </>
           ) : hasPnl ? (
             <>
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: '1.22rem', fontWeight: 800, color: pnlColor, lineHeight: 1 }}>
@@ -139,7 +146,8 @@ export default function Trades() {
 
   const load = useCallback(() => {
     setLoading(true)
-    fetch(`/api/trades?${filter ? `status=${filter}&` : ''}limit=200`)
+    const refreshOpen = filter === '' || filter === 'open'
+    fetch(`/api/trades?${filter ? `status=${filter}&` : ''}limit=200${refreshOpen ? '&refresh=1' : ''}`)
       .then(r => r.json())
       .then(d => { setTrades(d.trades || []); setAggregate(d.aggregate || null) })
       .catch(console.error)

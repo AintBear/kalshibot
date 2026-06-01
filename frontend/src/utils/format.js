@@ -198,11 +198,12 @@ export const paperActionInfo = (item, context = 'paper') => {
   const direction = String(item?.direction || 'yes').toUpperCase()
   const contracts = Number(rec.contracts || 0)
   const blocked = item?.event_has_open_trade || item?.details?.event_has_open_trade
+  const blockers = rec.blockers || []
   const phantom = item?.phantom_risk_level || item?.details?.phantom_risk_level || 'none'
   const edge = Number(rec.side_edge ?? opportunityEdge(item) ?? 0)
   const ev = Number(rec.expected_value_per_contract ?? edge)
   const canPlanned = item?.status === 'pending' && contracts > 0 && !blocked
-  const canManual = item?.status === 'pending' && !canPlanned && !blocked && phantom !== 'high' && edge > 0 && ev > 0
+  const canManual = item?.status === 'pending' && !canPlanned && !blockers.length && !blocked && phantom !== 'high' && edge > 0 && ev > 0
   const actionVerb = context === 'alerts' ? 'Open' : 'Paper'
   if (canPlanned) {
     return { enabled: true, manual: false, contracts, label: `${actionVerb} ${direction}`, sub: `${contracts} contract${contracts === 1 ? '' : 's'}` }

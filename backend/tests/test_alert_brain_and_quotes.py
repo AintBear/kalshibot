@@ -126,6 +126,44 @@ class TestBrainStatusSamples(unittest.TestCase):
         self.assertEqual(status["prediction_accuracy"], 0.0)
         self.assertEqual(status["excluded_reset_trades"], 10)
 
+    def test_strategy_metrics_exclude_explore_and_blocked_city_segments(self):
+        conn = sqlite3.connect(self.db_path)
+
+        def add_trade(ticker, pnl, clv, correct, details=None):
+            cur = conn.execute(
+                """INSERT INTO alerts
+                   (market_ticker, status, direction, market_price, model_prob, details)
+                   VALUES (?, 'paper_traded', 'no', 0.30, 0.10, ?)""",
+                (ticker, json.dumps(details or {})),
+            )
+            conn.execute(
+                """INSERT INTO trades
+                   (market_ticker, alert_id, direction, entry_price, exit_price, clv, pnl,
+                    status, exit_reason, paper, prediction_correct, exit_time)
+                   VALUES (?, ?, 'no', 0.30, ?, ?, ?,
+                           'closed', 'market_closed', 1, ?, datetime('now'))""",
+                (ticker, cur.lastrowid, 0.0 if correct else 1.0, clv, pnl, correct),
+            )
+
+        for i in range(3):
+            add_trade(f"KXHIGHTBOS-26MAY22-B7{i}.5", 0.30, 0.10, 1)
+        for i in range(2):
+            add_trade(f"KXHIGHTBOS-26MAY23-B8{i}.5", -0.70, -0.20, 0, {"learning_mode": "explore"})
+        for i in range(2):
+            add_trade(f"KXLOWTDEN-26MAY24-B5{i}.5", -0.70, -0.20, 0)
+        conn.commit()
+        conn.close()
+
+        from app.services.weather_brain import get_brain_status
+        status = get_brain_status()
+
+        self.assertEqual(status["learning_samples"], 3)
+        self.assertEqual(status["prediction_sample_count"], 3)
+        self.assertEqual(status["prediction_correct_count"], 3)
+        self.assertEqual(status["prediction_accuracy"], 1.0)
+        self.assertEqual(status["explore_stats"]["settled_trades"], 2)
+        self.assertEqual(status["explore_stats"]["prediction_accuracy"], 0.0)
+
     def test_live_entry_quality_stays_blocked_when_paper_pnl_and_hit_rate_are_bad(self):
         conn = sqlite3.connect(self.db_path)
         for i in range(7):
@@ -194,9 +232,70 @@ class TestPositionSizingTiers(unittest.TestCase):
         self.assertNotIn("event already has an open paper trade", rec["blockers"])
         self.assertIn(rec["tier"], ("learning", "tier_b", "tier_a"))
 
-    def test_recommendation_uses_side_ask_for_no_entry(self):
+    def test_den_low_segment_is_blocked_by_strategy_filter(self):
         from app.services.position_sizing import recommend_alert
 
+        rec = recommend_alert(
+            {
+                "market_ticker": "KXLOWTDEN-26MAY22-B39.5",
+                "direction": "no",
+                "market_price": 0.30,
+                "model_prob": 0.10,
+                "confidence": 0.80,
+                "brain_score": 70,
+                "brain_state": "watch",
+                "phantom_risk_level": "none",
+                "details": {},
+            },
+            {
+                "paper_trading": True,
+                "paper_unlimited_learning": False,
+                "paper_starting_balance": 500,
+                "paper_learning_max_contracts": 3,
+            },
+        )
+
+        self.assertTrue(any("KXLOWTDEN blocked" in blocker for blocker in rec["blockers"]))
+        self.assertEqual(rec["contracts"], 0)
+
+    def test_recommendation_uses_ask_when_paper_fill_model_is_ask(self):
+        from app.services.position_sizing import recommend_alert
+
+        alert = {
+            "direction": "no",
+            "market_price": 0.205,
+            "model_prob": 0.135,
+            "yes_bid": 0.18,
+            "yes_ask": 0.23,
+            "no_bid": 0.77,
+            "no_ask": 0.82,
+            "brain_score": 90,
+            "brain_state": "paper_ready",
+            "confidence": 0.70,
+            "details": {
+                "brain": {
+                    "score": 90,
+                    "state": "paper_ready",
+                    "learned": {"trade_count": 10, "positive_clv_rate": 0.60, "recent_avg_clv": 0.03},
+                },
+            },
+        }
+
+        rec = recommend_alert(
+            alert,
+            {"paper_starting_balance": 500, "kelly_fraction": 0.25, "paper_fill_model": "ask"},
+        )
+
+        self.assertEqual(rec["fill_model"], "ask")
+        self.assertAlmostEqual(rec["limit_price_side"], 0.82, places=4)
+        self.assertAlmostEqual(rec["limit_price_yes"], 0.18, places=4)
+        self.assertAlmostEqual(rec["side_edge"], 0.045, places=4)
+
+    def test_recommendation_uses_midpoint_for_no_entry_by_default(self):
+        from app.services.position_sizing import recommend_alert
+
+        # Paper mode defaults to midpoint fill so the bot stops paying the
+        # full spread on every entry — this is the limit-order assumption.
         rec = recommend_alert(
             {
                 "direction": "no",
@@ -220,9 +319,126 @@ class TestPositionSizingTiers(unittest.TestCase):
             {"paper_starting_balance": 500, "kelly_fraction": 0.25},
         )
 
-        self.assertAlmostEqual(rec["limit_price_side"], 0.82, places=4)
-        self.assertAlmostEqual(rec["limit_price_yes"], 0.18, places=4)
-        self.assertAlmostEqual(rec["side_edge"], 0.045, places=4)
+        # Midpoint of 0.77/0.82 = 0.795 -> rounded to 0.80
+        self.assertEqual(rec["fill_model"], "midpoint")
+        self.assertAlmostEqual(rec["limit_price_side"], 0.80, places=4)
+        self.assertAlmostEqual(rec["limit_price_yes"], 0.20, places=4)
+        self.assertAlmostEqual(rec["side_bid"], 0.77, places=4)
+        self.assertAlmostEqual(rec["side_ask"], 0.82, places=4)
+        # edge improved by 2c vs ask fill (0.865 - 0.80 = 0.065)
+        self.assertAlmostEqual(rec["side_edge"], 0.065, places=4)
+
+    def test_recommendation_bid_plus_1c_fill(self):
+        from app.services.position_sizing import recommend_alert
+
+        rec = recommend_alert(
+            {
+                "direction": "no",
+                "market_price": 0.30,
+                "model_prob": 0.20,
+                "no_bid": 0.68,
+                "no_ask": 0.72,
+                "brain_score": 90,
+                "brain_state": "paper_ready",
+                "confidence": 0.70,
+                "details": {
+                    "brain": {
+                        "score": 90,
+                        "state": "paper_ready",
+                        "learned": {"trade_count": 10, "positive_clv_rate": 0.60, "recent_avg_clv": 0.03},
+                    },
+                },
+            },
+            {"paper_starting_balance": 500, "paper_fill_model": "bid_plus_1c"},
+        )
+
+        # bid 0.68 + 1c = 0.69, below ask 0.72 so used as-is
+        self.assertEqual(rec["fill_model"], "bid_plus_1c")
+        self.assertAlmostEqual(rec["limit_price_side"], 0.69, places=4)
+
+    def test_recommendation_falls_back_to_ask_when_bid_missing(self):
+        from app.services.position_sizing import recommend_alert
+
+        # No bid published -> can't model a passive fill, default to ask
+        rec = recommend_alert(
+            {
+                "direction": "no",
+                "market_price": 0.30,
+                "model_prob": 0.20,
+                "no_ask": 0.72,
+                "brain_score": 90,
+                "brain_state": "paper_ready",
+                "confidence": 0.70,
+                "details": {
+                    "brain": {
+                        "score": 90,
+                        "state": "paper_ready",
+                        "learned": {"trade_count": 10, "positive_clv_rate": 0.60, "recent_avg_clv": 0.03},
+                    },
+                },
+            },
+            {"paper_starting_balance": 500, "paper_fill_model": "midpoint"},
+        )
+
+        self.assertAlmostEqual(rec["limit_price_side"], 0.72, places=4)
+
+    def test_recommendation_blocks_paper_on_wide_spread(self):
+        from app.services.position_sizing import recommend_alert
+
+        # 50c spread (e.g. 0.37/0.87) is a real example from the live DB.
+        # Midpoint at 0.62 looks attractive but no limit-order model can
+        # realistically fill there. Paper must block too.
+        rec = recommend_alert(
+            {
+                "direction": "no",
+                "market_price": 0.13,
+                "model_prob": 0.10,
+                "no_bid": 0.37,
+                "no_ask": 0.87,
+                "brain_score": 90,
+                "brain_state": "paper_ready",
+                "confidence": 0.70,
+                "details": {
+                    "spread": 0.50,
+                    "brain": {
+                        "score": 90,
+                        "state": "paper_ready",
+                        "learned": {"trade_count": 10, "positive_clv_rate": 0.60, "recent_avg_clv": 0.03},
+                    },
+                },
+            },
+            {"paper_starting_balance": 500},
+        )
+
+        self.assertIn("wide bid/ask spread", rec["blockers"])
+
+    def test_recommendation_blocks_thin_market_when_volume_floor_enabled(self):
+        from app.services.position_sizing import recommend_alert
+
+        rec = recommend_alert(
+            {
+                "direction": "no",
+                "market_price": 0.18,
+                "model_prob": 0.08,
+                "no_bid": 0.80,
+                "no_ask": 0.82,
+                "brain_score": 90,
+                "brain_state": "paper_ready",
+                "confidence": 0.70,
+                "details": {
+                    "volume_24h": 12,
+                    "brain": {
+                        "score": 90,
+                        "state": "paper_ready",
+                        "learned": {"trade_count": 10, "positive_clv_rate": 0.60, "recent_avg_clv": 0.03},
+                    },
+                },
+            },
+            {"paper_starting_balance": 500, "min_volume_24h": 25},
+        )
+
+        self.assertTrue(any("thin market" in blocker for blocker in rec["blockers"]))
+        self.assertEqual(rec["contracts"], 0)
 
     def test_bad_paper_segment_still_allows_contracts(self):
         from app.services.position_sizing import recommend_alert
@@ -562,6 +778,17 @@ class TestPaperEntryPricing(unittest.TestCase):
 
         self.assertAlmostEqual(price, 0.18, places=4)
 
+    def test_no_paper_entry_can_fallback_to_yes_bid(self):
+        from app.routers.alerts import _paper_entry_yes_price
+
+        price = _paper_entry_yes_price(
+            {"direction": "no", "market_price": 0.205, "live_yes_bid": 0.19},
+            {},
+            {},
+        )
+
+        self.assertAlmostEqual(price, 0.19, places=4)
+
     def test_yes_paper_entry_uses_yes_ask(self):
         from app.routers.alerts import _paper_entry_yes_price
 
@@ -572,6 +799,54 @@ class TestPaperEntryPricing(unittest.TestCase):
         )
 
         self.assertAlmostEqual(price, 0.23, places=4)
+
+    def test_yes_paper_entry_can_fallback_to_no_bid(self):
+        from app.routers.alerts import _paper_entry_yes_price
+
+        price = _paper_entry_yes_price(
+            {"direction": "yes", "market_price": 0.205, "live_no_bid": 0.76},
+            {},
+            {},
+        )
+
+        self.assertAlmostEqual(price, 0.24, places=4)
+
+    def test_open_no_trade_marks_to_exit_bid_and_reports_spread(self):
+        from app.routers.trades import _attach_live_trade_marks
+
+        trade = {
+            "direction": "no",
+            "entry_price": 0.28,
+            "contracts": 3,
+            "current_yes_price": 0.29,
+            "no_bid": 0.70,
+            "no_ask": 0.72,
+        }
+
+        _attach_live_trade_marks(trade)
+
+        self.assertEqual(trade["entry_side_price"], 0.72)
+        self.assertEqual(trade["current_price"], 0.70)
+        self.assertEqual(trade["mark_price_type"], "exit_bid")
+        self.assertAlmostEqual(trade["current_spread"], 0.02, places=4)
+        self.assertAlmostEqual(trade["spread_mark_cost"], 0.06, places=4)
+        self.assertAlmostEqual(trade["unrealized_pnl"], -0.06, places=4)
+
+    def test_learning_override_respects_recommendation_blockers(self):
+        from fastapi import HTTPException
+        from app.routers.alerts import _validate_learning_override
+
+        with self.assertRaises(HTTPException) as ctx:
+            _validate_learning_override(
+                {"phantom_risk_level": "none"},
+                {
+                    "side_edge": 0.20,
+                    "expected_value_per_contract": 0.20,
+                    "blockers": ["yes blocked (0% accuracy on real settlements)"],
+                },
+            )
+
+        self.assertIn("yes blocked", ctx.exception.detail)
 
     def test_no_exit_recommendation_does_not_readd_default_exits(self):
         from app.services.order_manager import recommendation_exit_args
@@ -586,6 +861,45 @@ class TestPaperEntryPricing(unittest.TestCase):
         self.assertIsNone(args["take_profit_pct"])
         self.assertIsNone(args["stop_loss_price"])
         self.assertIsNone(args["take_profit_price"])
+
+    def test_live_price_refresh_checks_open_trade_without_exit_thresholds(self):
+        from app.database import init_db, get_conn
+
+        db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        db_path = db_file.name
+        db_file.close()
+        os.environ["DB_PATH"] = db_path
+        init_db()
+        try:
+            conn = get_conn()
+            conn.execute(
+                """INSERT INTO trades
+                   (market_ticker, direction, entry_price, contracts, paper, status, entry_time)
+                   VALUES ('KXHIGHTEST-26APR30-B51', 'no', 0.28, 3, 1, 'open', datetime('now'))"""
+            )
+            conn.commit()
+            conn.close()
+
+            with patch(
+                "app.services.trade_lifecycle._refresh_trade_quote",
+                return_value={
+                    "market_status": "open",
+                    "market_price": 0.29,
+                    "yes_bid": 0.28,
+                    "yes_ask": 0.30,
+                    "no_bid": 0.70,
+                    "no_ask": 0.72,
+                },
+            ) as refresh_quote:
+                from app.services.trade_lifecycle import check_live_prices
+
+                result = check_live_prices()
+
+            self.assertEqual(result["checked"], 1)
+            self.assertEqual(result["closed"], 0)
+            refresh_quote.assert_called_once_with("KXHIGHTEST-26APR30-B51")
+        finally:
+            os.unlink(db_path)
 
 class TestAutoEntryExecutionGates(unittest.TestCase):
     def setUp(self):
@@ -631,6 +945,19 @@ class TestAutoEntryExecutionGates(unittest.TestCase):
                        'open', '2099-01-01T00:00:00Z', ?)""",
             (ticker, ticker, raw),
         )
+
+    def test_automation_cycle_skips_when_already_running(self):
+        from app.services import auto_entry
+
+        self.assertTrue(auto_entry._automation_lock.acquire(blocking=False))
+        try:
+            result = auto_entry.run_automation_cycle(settings_override=self._settings())
+        finally:
+            auto_entry._automation_lock.release()
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["total_entered"], 0)
+        self.assertIn("already running", result["reason"])
 
     def test_auto_entry_respects_max_open_paper_trades_for_learning(self):
         conn = sqlite3.connect(self.db_path)
@@ -746,6 +1073,49 @@ class TestAutoEntryExecutionGates(unittest.TestCase):
         tickers = [call.kwargs["market_ticker"] for call in place_order.call_args_list]
         self.assertIn("KXHIGHELIG-26APR30-B51", tickers)
         self.assertNotIn("KXHIGHDUP-26APR30-B0", tickers)
+
+    def test_auto_entry_respects_explore_open_cap(self):
+        conn = sqlite3.connect(self.db_path)
+        for i in range(2):
+            cur = conn.execute(
+                """INSERT INTO alerts
+                   (market_ticker, status, direction, market_price, model_prob, details)
+                   VALUES (?, 'paper_traded', 'no', 0.50, 0.10, ?)""",
+                (f"KXEXPLOREOPEN-26APR30-B{i}", json.dumps({"learning_mode": "explore"})),
+            )
+            conn.execute(
+                """INSERT INTO trades
+                   (market_ticker, alert_id, direction, entry_price, contracts, paper, status, entry_time)
+                   VALUES (?, ?, 'no', 0.50, 1, 1, 'open', datetime('now'))""",
+                (f"KXEXPLOREOPEN-26APR30-B{i}", cur.lastrowid),
+            )
+        self._insert_open_market(conn, "KXHIGHTEST-26APR30-B51")
+        conn.execute(
+            """INSERT INTO alerts
+               (market_ticker, status, edge, direction, market_price, model_prob,
+                confidence, brain_score, brain_state, phantom_risk_level, details)
+               VALUES ('KXHIGHTEST-26APR30-B51', 'pending', -0.40, 'no', 0.50, 0.10,
+                       0.80, 64, 'caution', 'none', '{}')"""
+        )
+        conn.commit()
+        conn.close()
+
+        settings = {
+            **self._settings(),
+            "paper_unlimited_learning": False,
+            "paper_learning_explore_enabled": True,
+            "paper_learning_explore_max_per_scan": 3,
+            "paper_learning_explore_max_open": 2,
+        }
+        with patch("app.config.load", return_value=settings), \
+             patch("app.services.weather_brain.get_brain_status", return_value={**self._brain(), "open_trades": 2}), \
+             patch("app.services.order_manager.place_order", return_value={"trade_id": 456}) as place_order:
+            from app.services.auto_entry import auto_enter_qualifying_alerts
+            result = auto_enter_qualifying_alerts()
+
+        self.assertEqual(result["explore_quota"], 0)
+        self.assertEqual(result["explore_entered"], 0)
+        place_order.assert_not_called()
 
     def test_auto_entry_skips_current_low_prediction_accuracy_segment(self):
         conn = sqlite3.connect(self.db_path)

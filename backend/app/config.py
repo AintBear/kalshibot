@@ -18,6 +18,31 @@ _defaults = {
     "paper_learning_min_side_edge": 0.0,
     "paper_learning_min_confidence": 0.0,
     "paper_learning_max_contracts": 3,
+    "paper_learning_explore_enabled": False,
+    "paper_learning_explore_max_per_scan": 3,
+    "paper_learning_explore_max_open": 30,
+    # Fill model controls how entry_price is computed from the live order book.
+    # paper: "midpoint" simulates a passive limit order; switch to "ask" to
+    # reproduce the legacy spread-paying behavior. live: stays "ask" until the
+    # live limit-order management plumbing in order_manager.py lands.
+    "paper_fill_model": "midpoint",
+    "live_fill_model": "ask",
+    # Intraday observed-temperature injection. When true, weather_model checks
+    # what temperature has already been observed for the city today and uses
+    # it to sharpen the model probability (e.g. if a HIGH bracket has already
+    # been exceeded, model prob -> near certainty).
+    "intraday_temps_enabled": True,
+    "intraday_temps_cache_seconds": 600,
+    # Liquidity floors. Thin Kalshi weather markets ($20-50 24h volume) have
+    # wide spreads, bad fills, and outsized slippage when even 1-3 contracts
+    # move the price. min_volume_24h is conservative; raise if recent CLV is
+    # still negative on the strategy slice.
+    "min_volume_24h": 25.0,
+    "min_open_interest": 0.0,
+    # ECMWF (European weather model) via Open-Meteo — independent of NWS/GFS,
+    # so its agreement/disagreement is a real confidence signal. Set false to
+    # save one HTTP call per scan if the third source is causing rate issues.
+    "ecmwf_enabled": True,
     "automation_enabled": False,
     "auto_trade_enabled": False,
     "max_contracts_per_trade": 5,

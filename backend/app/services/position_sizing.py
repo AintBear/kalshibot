@@ -2,8 +2,9 @@ import math
 import re
 from typing import Optional, Tuple
 
-_BLOCKED_CITY_SEGMENTS = {
+BLOCKED_CITY_SEGMENTS = {
     "KXLOWTDC",      # 28.6% accuracy, -$7.41, 7 trades
+    "KXLOWTDEN",     # 25.0% accuracy, -$8.16, 8 trades
     "KXLOWTPHIL",    # 28.6% accuracy, -$8.12, 7 trades
     "KXLOWTOKC",     # 36.4% accuracy, -$8.48, 11 trades
     "KXHIGHTNOLA",   # 37.5% accuracy, -$4.84, 8 trades
@@ -12,6 +13,7 @@ _BLOCKED_CITY_SEGMENTS = {
     "KXLOWTNOLA",    # 57.1% accuracy, -$4.24, 14 trades
     "KXHIGHTSFO",    # 60.0% accuracy, -$4.08, 15 trades
 }
+_BLOCKED_CITY_SEGMENTS = BLOCKED_CITY_SEGMENTS
 
 # Stop/TP audit snapshot from data/sibylla.db on 2026-05-08:
 # - Stop-loss exits are negative in every time-held bucket:
@@ -35,16 +37,25 @@ def paper_balance(settings: dict) -> float:
     return round(float(settings.get("paper_starting_balance", 500.0) or 500.0) + float(row[0] or 0.0), 2)
 
 
-def recommend_alert(alert: dict, settings: dict) -> dict:
+def recommend_alert(alert: dict, settings: dict, explore: bool = False) -> dict:
     """Adaptive sizing: paper mode uses relaxed gates to collect learning data;
-    live mode keeps all strict trust/segment gates."""
+    live mode keeps all strict trust/segment gates.
+
+    explore=True (paper only) suppresses soft, evidence-based blockers
+    (segment performance, threshold markets, 40c+ NO, blocked city+segment,
+    bracket within 1° of forecast). Iron-law blockers (YES at all, NO sub-20c,
+    NO 85c+) still apply — those are confirmed catastrophic patterns.
+    Explore trades are forced to 1 contract."""
     is_paper = settings.get("paper_trading", True)
 
     direction = alert.get("direction") or "yes"
     details = alert.get("details") or {}
     mark_yes_price = _bounded(alert.get("market_price"))
     yes_prob = _bounded(alert.get("model_prob"))
-    entry, entry_yes_price = _entry_prices(alert, details, direction, mark_yes_price)
+    fill_model = _resolve_fill_model(settings, is_paper)
+    entry, entry_yes_price, fill_meta = _entry_prices(
+        alert, details, direction, mark_yes_price, fill_model=fill_model
+    )
     side_prob = 1.0 - yes_prob if direction == "no" else yes_prob
     edge = side_prob - entry
     max_gain = max(0.0, 1.0 - entry)
@@ -94,10 +105,34 @@ def recommend_alert(alert: dict, settings: dict) -> dict:
         blockers.append("event already has an open paper trade")
     spread = details.get("spread")
     try:
-        if not is_paper and spread is not None and float(spread) >= 0.15:
+        if spread is not None and float(spread) >= 0.15:
+            # Wide spreads make limit-order fills unrealistic and market-order
+            # fills ruinously expensive. Block in paper too — there is no
+            # honest fill model that survives a 15c+ spread.
             blockers.append("wide bid/ask spread")
     except (TypeError, ValueError):
         pass
+
+    # Liquidity floor — thin markets have wide spreads, bad fills, and
+    # outsized slippage when our 1-3 contract order moves the price. The
+    # bot historically traded markets with $20 in 24h volume.
+    min_volume = float(settings.get("min_volume_24h") or 0.0)
+    if min_volume > 0:
+        vol = details.get("volume_24h")
+        try:
+            if vol is not None and float(vol) < min_volume:
+                blockers.append(f"thin market ({float(vol):.0f} 24h vol < ${min_volume:.0f} floor)")
+        except (TypeError, ValueError):
+            pass
+
+    min_oi = float(settings.get("min_open_interest") or 0.0)
+    if min_oi > 0:
+        oi = details.get("open_interest")
+        try:
+            if oi is not None and float(oi) < min_oi:
+                blockers.append(f"low open interest ({float(oi):.0f} < {min_oi:.0f} floor)")
+        except (TypeError, ValueError):
+            pass
 
     ticker_upper = (alert.get("market_ticker") or details.get("ticker") or "").upper()
     is_low_market = "LOW" in ticker_upper
@@ -109,26 +144,31 @@ def recommend_alert(alert: dict, settings: dict) -> dict:
     ticker_series = ticker_upper.split("-")[0] if "-" in ticker_upper else ticker_upper
     is_blocked_city_segment = ticker_series in _BLOCKED_CITY_SEGMENTS
     if is_paper:
-        if seg_prediction_bad and not unlimited_paper:
-            blockers.append(f"similar predictions only {seg_prediction_accuracy * 100:.0f}% correct")
-        if not unlimited_paper and seg_trade_count >= 10 and seg_recent_clv < 0 and seg_positive_rate < 0.25:
-            blockers.append(f"similar entries have weak results ({seg_positive_rate * 100:.0f}% good, recent {seg_recent_clv * 100:+.1f}c)")
-        if not unlimited_paper and direction == "yes":
+        # Iron-law blockers: catastrophic patterns confirmed on real settlements.
+        # Applied even in unlimited_paper and explore modes.
+        if direction == "yes":
             blockers.append("yes blocked (0% accuracy on 26 real settlements)")
-        if not unlimited_paper and is_threshold:
-            blockers.append("threshold markets blocked (25% NO accuracy, 0% YES accuracy)")
-        if not unlimited_paper and direction == "no" and mark_yes_price > 0.85:
-            blockers.append("no against 85c+ market (0% accuracy)")
-        if not unlimited_paper and direction == "no" and mark_yes_price < 0.20:
+        if direction == "no" and mark_yes_price < 0.20:
             blockers.append(f"no sub-20c blocked (need {breakeven_accuracy*100:.0f}% accuracy to break even)")
-        if not unlimited_paper and direction == "no" and not is_low_market and mark_yes_price > 0.40:
+        if direction == "no" and mark_yes_price > 0.85:
+            blockers.append("no against 85c+ market (0% accuracy)")
+
+        # Soft, evidence-based blockers: suppressed in unlimited or explore mode.
+        soft_off = unlimited_paper or explore
+        if not soft_off and seg_prediction_bad:
+            blockers.append(f"similar predictions only {seg_prediction_accuracy * 100:.0f}% correct")
+        if not soft_off and seg_trade_count >= 10 and seg_recent_clv < 0 and seg_positive_rate < 0.25:
+            blockers.append(f"similar entries have weak results ({seg_positive_rate * 100:.0f}% good, recent {seg_recent_clv * 100:+.1f}c)")
+        if not soft_off and is_threshold:
+            blockers.append("threshold markets blocked (25% NO accuracy, 0% YES accuracy)")
+        if not soft_off and direction == "no" and not is_low_market and mark_yes_price > 0.40:
             blockers.append("no-HIGH above 40c blocked (44% accuracy at 40-50c, losing money)")
-        if not unlimited_paper and direction == "no" and is_low_market and mark_yes_price > 0.40:
+        if not soft_off and direction == "no" and is_low_market and mark_yes_price > 0.40:
             blockers.append("no-LOW above 40c blocked (25% accuracy, losing money)")
-        if not unlimited_paper and is_blocked_city_segment:
+        if not soft_off and is_blocked_city_segment:
             blockers.append(f"{ticker_series} blocked (losing city+segment combo)")
-        if not unlimited_paper and forecast_distance is not None and forecast_distance <= 2.0:
-            blockers.append(f"bracket within {forecast_distance:.0f}° of forecast (coin flip zone)")
+        if not soft_off and forecast_distance is not None and forecast_distance <= 1.0:
+            blockers.append(f"bracket within {forecast_distance:.1f}° of forecast (coin flip zone)")
     else:
         if not seg_auto_eligible:
             blockers.append("similar trades have not earned auto sizing")
@@ -190,6 +230,9 @@ def recommend_alert(alert: dict, settings: dict) -> dict:
             contracts = max(1, min(contracts, math.floor(max_dollar_risk / max(entry, 0.01))))
         contracts = min(contracts, ABSOLUTE_MAX_CONTRACTS)
 
+        if is_paper and explore:
+            contracts = 1
+
         if is_paper:
             action = "paper" if state == "paper_ready" else "learn"
         else:
@@ -227,6 +270,9 @@ def recommend_alert(alert: dict, settings: dict) -> dict:
         "tier_label": tier_label,
         "limit_price_side": limit_side,
         "limit_price_yes": limit_yes,
+        "fill_model": fill_meta.get("fill_model"),
+        "side_bid": fill_meta.get("side_bid"),
+        "side_ask": fill_meta.get("side_ask"),
         "stop_loss_price": stop_loss_price_yes,
         "take_profit_price": take_profit_price,
         "risk_budget": round(risk_budget, 2),
@@ -252,6 +298,7 @@ def recommend_alert(alert: dict, settings: dict) -> dict:
         "drivers": drivers,
         "blockers": blockers,
         "reason": "; ".join(blockers[:3]) if blockers else "positive edge, positive expected value, and trust check passed",
+        "learning_mode": "explore" if (is_paper and explore) else None,
     }
 
 
@@ -420,23 +467,106 @@ def _quote_value(alert: dict, details: dict, field: str) -> Optional[float]:
         return None
 
 
-def _entry_prices(alert: dict, details: dict, direction: str, mark_yes_price: float) -> Tuple[float, float]:
-    """Return side-entry price and canonical YES price for the chosen side.
+FILL_MODELS = ("ask", "midpoint", "bid_plus_1c")
+DEFAULT_PAPER_FILL_MODEL = "midpoint"
+DEFAULT_LIVE_FILL_MODEL = "ask"
+
+
+def _resolve_fill_model(settings: dict, is_paper: bool) -> str:
+    """Pick the entry-fill model.
+
+    Paper mode defaults to ``midpoint`` because the bot was historically
+    entering at the ask and bleeding the spread (-0.57c recent CLV). For
+    live mode we still default to ``ask`` so we never simulate fills that
+    we have not actually built order plumbing for.
+    """
+    if is_paper:
+        key = "paper_fill_model"
+        default = DEFAULT_PAPER_FILL_MODEL
+    else:
+        key = "live_fill_model"
+        default = DEFAULT_LIVE_FILL_MODEL
+    model = str(settings.get(key) or default).lower()
+    if model not in FILL_MODELS:
+        model = default
+    return model
+
+
+def _round_cent(value: float) -> float:
+    return round(round(value * 100) / 100.0, 4)
+
+
+def _apply_fill_model(bid: Optional[float], ask: Optional[float], model: str) -> Optional[float]:
+    """Return the realized side-entry price under the chosen fill model.
+
+    Returns None if the inputs are insufficient (caller should fall back).
+    """
+    if ask is None:
+        return None
+    if bid is None or bid <= 0:
+        # No bid published — only the ask is realistic.
+        return _bounded(_round_cent(ask))
+    if ask < bid:
+        # Crossed book or stale quote — treat as ask.
+        return _bounded(_round_cent(ask))
+    if model == "ask":
+        return _bounded(_round_cent(ask))
+    if model == "bid_plus_1c":
+        # Post a passive bid one cent above the resting bid.
+        cand = min(ask, bid + 0.01)
+        return _bounded(_round_cent(cand))
+    # midpoint (default for paper). Bias 1c toward the ask on penny rounding
+    # so we never claim a sub-bid fill — the queue at bid still has to clear.
+    mid = (bid + ask) / 2.0
+    rounded = _round_cent(mid)
+    if rounded <= bid:
+        rounded = _round_cent(bid + 0.01)
+    if rounded > ask:
+        rounded = _round_cent(ask)
+    return _bounded(rounded)
+
+
+def _entry_prices(
+    alert: dict,
+    details: dict,
+    direction: str,
+    mark_yes_price: float,
+    fill_model: str = "ask",
+) -> Tuple[float, float, dict]:
+    """Return side-entry price, canonical YES price, and fill metadata.
 
     Trades are stored as YES-price coordinates so settlement math remains
-    consistent. For buying, the realistic side cost is the ask: YES ask for a
-    YES buy, NO ask for a NO buy.
+    consistent. The historical default was ``ask`` (pay the spread on every
+    fill); the new paper default is ``midpoint`` (model a passive limit
+    order that fills near the middle of the book).
     """
     if direction == "no":
-        no_ask = _quote_value(alert, details, "no_ask")
-        side_entry = no_ask if no_ask is not None else 1.0 - mark_yes_price
-        yes_entry = 1.0 - side_entry
+        bid = _quote_value(alert, details, "no_bid")
+        ask = _quote_value(alert, details, "no_ask")
     else:
-        yes_ask = _quote_value(alert, details, "yes_ask")
-        side_entry = yes_ask if yes_ask is not None else mark_yes_price
-        yes_entry = side_entry
+        bid = _quote_value(alert, details, "yes_bid")
+        ask = _quote_value(alert, details, "yes_ask")
 
-    return _bounded(side_entry), _bounded(yes_entry)
+    realized = _apply_fill_model(bid, ask, fill_model)
+    if realized is None:
+        if direction == "no":
+            realized = 1.0 - mark_yes_price
+        else:
+            realized = mark_yes_price
+        used_model = "fallback"
+    else:
+        used_model = fill_model
+
+    side_entry = _bounded(realized)
+    yes_entry = _bounded(1.0 - side_entry) if direction == "no" else side_entry
+
+    meta = {
+        "fill_model": used_model,
+        "side_bid": _bounded(bid) if bid is not None else None,
+        "side_ask": _bounded(ask) if ask is not None else None,
+        "side_entry": side_entry,
+    }
+    return side_entry, yes_entry, meta
 
 
 def _adaptive_exit_prices(

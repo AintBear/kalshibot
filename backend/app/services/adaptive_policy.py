@@ -179,9 +179,10 @@ def rebuild_snapshots() -> dict:
     conn = _get_conn()
 
     all_trades = conn.execute(
-        """SELECT t.market_ticker, t.clv, t.pnl, t.exit_reason, t.exit_time,
+        """SELECT t.market_ticker, t.direction, t.clv, t.pnl, t.exit_reason, t.exit_time,
                   t.prediction_correct,
-                  a.details
+                  a.details,
+                  COALESCE(json_extract(a.details, '$.learning_mode'), '') AS learning_mode
            FROM trades t
            LEFT JOIN alerts a ON t.alert_id = a.id
            WHERE t.status IN ('closed','settled')
@@ -201,19 +202,22 @@ def rebuild_snapshots() -> dict:
             pass
         seg = details.get("segment", "weather_all")
         bucket = details.get("time_bucket", "all")
-        direction = details.get("direction", "unknown")
+        direction = details.get("direction") or row["direction"] or "unknown"
         seg_key = f"{seg}:{bucket}"
         dir_seg_key = f"{direction}:{seg}:{bucket}"
-        segments.setdefault("weather_all:all", []).append(row)
+        prefix = "explore:" if (row["learning_mode"] or "").lower() == "explore" else ""
+        segments.setdefault(f"{prefix}weather_all:all", []).append(row)
         if seg_key != "weather_all:all":
-            segments.setdefault(seg_key, []).append(row)
+            segments.setdefault(f"{prefix}{seg_key}", []).append(row)
         if direction in ("yes", "no"):
-            segments.setdefault(dir_seg_key, []).append(row)
+            segments.setdefault(f"{prefix}{dir_seg_key}", []).append(row)
 
     results = {}
     conn.execute("DELETE FROM adaptive_segments")
     for seg_key, trades in segments.items():
         snap = _build_snapshot(seg_key, trades)
+        if seg_key.startswith("explore:"):
+            snap = _explore_snapshot(seg_key, snap)
         conn.execute(
             """INSERT INTO adaptive_segments
                (segment_key, auto_eligible, avg_clv, avg_pnl,
@@ -359,6 +363,23 @@ def _build_snapshot(segment_key: str, trades: list) -> dict:
         "avg_clv": avg_clv,
         "avg_pnl": avg_pnl,
         "trade_count": n,
+        "details": details,
+    }
+
+
+def _explore_snapshot(segment_key: str, snap: dict) -> dict:
+    details = dict(snap.get("details") or {})
+    checks = dict(details.get("policy_ready_checks") or {})
+    checks["explore_held_out"] = True
+    details["policy_ready_checks"] = checks
+    details["learning_mode"] = "explore"
+    details["paper_auto_eligible"] = False
+    details.setdefault("lessons", []).append(
+        "Explore-mode outcomes are held out from strategy sizing until reviewed."
+    )
+    return {
+        **snap,
+        "auto_eligible": False,
         "details": details,
     }
 

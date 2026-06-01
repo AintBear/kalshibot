@@ -119,7 +119,7 @@ function AlertCandidate({ alert, onAction }) {
       return
     }
     setBusy(false)
-    onAction()
+    onAction(true)
   }
 
   const dismiss = () => fetch(`/api/alerts/${alert.id}/skip`, { method: 'POST' }).then(onAction).catch(onAction)
@@ -168,12 +168,14 @@ function OpenTrade({ trade }) {
   const { city, rest } = humanizeMarketParts(trade.market_ticker, trade.market_title)
   const title = [city, rest].filter(Boolean).join(' · ') || 'Weather market'
   const pnl = Number(trade.unrealized_pnl || 0)
+  const spreadCost = Number(trade.spread_mark_cost || 0)
+  const spreadOnly = pnl < 0 && spreadCost > 0 && Math.abs(pnl) <= spreadCost + 0.01
   const sideStop = trade.stop_loss_price == null ? null : trade.direction === 'no' ? 1 - Number(trade.stop_loss_price) : Number(trade.stop_loss_price)
   const sideTarget = trade.take_profit_price == null ? null : trade.direction === 'no' ? 1 - Number(trade.take_profit_price) : Number(trade.take_profit_price)
   const current = trade.current_price == null ? null : Number(trade.current_price)
   const nearStop = current != null && sideStop != null && current <= sideStop + 0.03
   const nearTarget = current != null && sideTarget != null && current >= sideTarget - 0.03
-  const status = nearStop ? 'Near stop' : nearTarget ? 'Near target' : pnl >= 0 ? 'In profit' : 'In drawdown'
+  const status = nearStop ? 'Near stop' : nearTarget ? 'Near target' : pnl >= 0 ? 'In profit' : spreadOnly ? 'Bid spread' : 'In drawdown'
   const badge = nearStop ? 'badge-red' : nearTarget ? 'badge-green' : pnl >= 0 ? 'badge-green' : 'badge-amber'
 
   const prevPrice = useRef(current)
@@ -212,12 +214,17 @@ function OpenTrade({ trade }) {
       </div>
       <div className="paper-metrics-grid compact">
         <div><span>Entry</span><strong>{fmtPct(entry)}</strong></div>
-        <div><span>Current</span><strong className={flash || ''}>{fmtPct(trade.current_price)}</strong></div>
-        <div><span>Stop</span><strong>{fmtPct(sideStop)}</strong></div>
-        <div><span>Target</span><strong>{fmtPct(sideTarget)}</strong></div>
+        <div><span>Exit bid</span><strong className={flash || ''}>{fmtPct(trade.current_price)}</strong></div>
+        <div><span>Spread</span><strong>{fmtPct(trade.current_spread, 0)}</strong></div>
+        <div><span>Mark</span><strong>{trade.mark_price_type === 'exit_bid' ? 'Bid' : stateLabel(trade.mark_price_type)}</strong></div>
         <div><span>Contracts</span><strong>{trade.contracts}</strong></div>
         <div><span>Entry Trust</span><strong>{trade.brain_score ?? '—'}</strong></div>
       </div>
+      {spreadOnly && (
+        <div className="paper-reason">
+          Marked at the exit bid, so the initial red number is mostly the bid/ask spread, not a settled loss.
+        </div>
+      )}
     </div>
   )
 }
@@ -234,8 +241,8 @@ export default function Paper() {
     if (refreshMarks) setRefreshingMarks(true)
     else setLoading(true)
     Promise.all([
-      fetch('/api/alerts?status=pending&limit=60').then(r => r.json()),
-      fetch(`/api/trades?status=open&limit=120${refreshMarks ? '&refresh=1' : ''}`).then(r => r.json()),
+      fetch('/api/alerts?status=pending&limit=60&refresh=1').then(r => r.json()),
+      fetch('/api/trades?status=open&limit=120&refresh=1').then(r => r.json()),
       fetch('/api/trades?status=closed&limit=500').then(r => r.json()),
       fetch('/api/overview').then(r => r.json()),
     ]).then(([a, t, c, o]) => {

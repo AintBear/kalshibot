@@ -300,26 +300,45 @@ def _attach_live_trade_marks(trade: dict) -> None:
     except (TypeError, ValueError):
         return
     if trade.get("direction") == "no":
-        current_side = trade.get("no_bid")
-        if current_side is None:
-            current_side = 1.0 - current_yes
+        side_bid = _as_price(trade.get("no_bid"))
+        side_ask = _as_price(trade.get("no_ask"))
+        current_side = side_bid if side_bid is not None else 1.0 - current_yes
         try:
             current_side = float(current_side)
         except (TypeError, ValueError):
             current_side = 1.0 - current_yes
         entry_side = 1.0 - entry
-        trade["current_price"] = round(current_side, 4)
-        trade["unrealized_pnl"] = round((current_side - entry_side) * contracts, 4)
     else:
-        current_side = trade.get("yes_bid")
-        if current_side is None:
-            current_side = current_yes
+        side_bid = _as_price(trade.get("yes_bid"))
+        side_ask = _as_price(trade.get("yes_ask"))
+        current_side = side_bid if side_bid is not None else current_yes
         try:
             current_side = float(current_side)
         except (TypeError, ValueError):
             current_side = current_yes
-        trade["current_price"] = round(current_side, 4)
-        trade["unrealized_pnl"] = round((current_side - entry) * contracts, 4)
+        entry_side = entry
+
+    spread = None
+    if side_bid is not None and side_ask is not None:
+        spread = max(0.0, side_ask - side_bid)
+
+    trade["entry_side_price"] = round(entry_side, 4)
+    trade["current_price"] = round(current_side, 4)
+    trade["mark_price_type"] = "exit_bid"
+    trade["current_side_bid"] = round(side_bid, 4) if side_bid is not None else None
+    trade["current_side_ask"] = round(side_ask, 4) if side_ask is not None else None
+    trade["current_spread"] = round(spread, 4) if spread is not None else None
+    trade["spread_mark_cost"] = round(spread * contracts, 4) if spread is not None else None
+    trade["unrealized_pnl"] = round((current_side - entry_side) * contracts, 4)
+
+
+def _as_price(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @router.post("/trades/backfill-settlements")
