@@ -1,6 +1,6 @@
 # KalshiBot - Project Instructions
 
-## Bot Status (updated 2026-06-01, session 16 — verified from live API + DB)
+## Bot Status (updated 2026-06-01, session 17 — verified from live API + DB)
 
 **Overall realized P&L: -$75.92** on 655 real `market_closed` settlements | **Strategy zone P&L: +$23.51** on 310 NO 20-40c bracket trades | **30 open paper trades** | **Brain score: 82** | **Biggest score gap: `clv +6.48` (blended CLV +0.68c, max at +5c)** | **138 tests pass**
 
@@ -48,6 +48,39 @@ Each session, do exactly two things from this priority list (top = highest impac
 5. **Infrastructure** — Tests, monitoring, deployment reliability.
 
 After each session, update the status table above and note what changed.
+
+## What Was Done (2026-06-01, session 17 — Claude/Opus)
+
+User confirmed they're moving off the Mac/PC and onto a paid VPS. Shipped the Fly.io deploy path + a Codex handoff doc.
+
+### Fly.io deployment artifacts
+
+- **`fly.toml`** at repo root. App name `sibylla-kalshibot`, region `iad`, shared-cpu-1x with 512MB. Two persistent volumes mounted at `/app/data` and `/app/config`. `auto_stop_machines = "off"` and `min_machines_running = 1` because the bot's whole job is the scheduled scan loop — letting Fly idle the machine kills it. Healthcheck hits `/health` every 30s, which now correctly 503s on scan errors per session 14.
+- **`scripts/fly-bootstrap-secrets.sh`** uploads `config/settings.json` + `config/kalshi_private_key.pem` via SFTP into the persistent config volume. NOT stored as Fly secrets — that way they can be rotated via SSH without redeploying.
+- **`scripts/fly-deploy.sh`** is the day-2 command: rebuild, deploy, sweep `/health` and a couple of endpoints, print the brain score breakdown. Use after `git push`.
+- **`DEPLOYMENT.md` rewritten** as a real Fly.io guide with the exact 7-step first-time setup, day-2 deploys, log/SSH/key-rotation commands, and the "exactly one replica because SQLite is single-writer" constraints that apply to every host.
+- **Cost**: $0–$7/mo. Fly's free allowance currently covers this footprint.
+- **Not done**: frontend deployment (still local), GitHub Actions auto-deploy on main. Both flagged in DEPLOYMENT.md and the handoff doc; deferred until user decides.
+
+### Codex handoff doc
+
+**`CODEX_HANDOFF.md`** at repo root. The running handoff between Codex and Claude. Lists:
+
+1. PR #2 review prompts to verify (sessions 14, 15, 16 — three separate comment threads on the same PR)
+2. Fly.io deployment help if user invokes Codex with Fly credentials available
+3. Live limit-order management in `order_manager.py` (deferred until forward-validation passes)
+4. Forward-validation checkpoint at ~30 fresh settlements (brain breakdown shows the answer in real time)
+5. Slice calibration sanity-check once any slice crosses 20 samples
+6. AccuWeather doc/code reconciliation (low priority, not blocking)
+
+Also documents the coordination protocol: each session opens a PR with explicit numbered review prompts, the other agent verifies and posts findings as a PR comment, no silent merges.
+
+### Cross-agent coordination is live
+
+- PR #1 (Codex session 11): OPEN, Claude has commented with the 4-point verification — all four passed.
+- PR #2 (Claude sessions 14–16, stacked on Codex's branch): OPEN with 3 explicit Codex review-prompt comments for the 14/15/16 layers.
+- Both PRs against `main`, Codex's stacks under Claude's. Land order is #1 first, then #2.
+- Repo: <https://github.com/AintBear/kalshibot>
 
 ## What Was Done (2026-06-01, session 16 — Claude/Opus)
 
