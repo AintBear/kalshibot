@@ -658,6 +658,7 @@ def _process_market(
             "spread": quote.get("spread"),
             "liquidity": quote.get("liquidity"),
             "volume_24h": quote.get("volume_24h"),
+            "open_interest": market.get("open_interest"),
         },
     )
 
@@ -673,6 +674,7 @@ def _process_market(
         "spread": quote.get("spread"),
         "liquidity": quote.get("liquidity"),
         "volume_24h": quote.get("volume_24h"),
+        "open_interest": market.get("open_interest"),
         "event_ticker": event_ticker,
         "event_has_open_trade": event_has_open_trade,
         "kalshi_url": f"https://kalshi.com/markets/{series_ticker}/{event_ticker}",
@@ -696,17 +698,7 @@ def _process_market(
             "brain_score": brain["score"],
             "brain_state": brain["state"],
             "phantom_risk_level": result["phantom_risk_level"],
-            "details": {
-                "brain": brain,
-                "event_has_open_trade": event_has_open_trade,
-                "hours_to_close": result.get("hours_to_close"),
-                "time_priority": result.get("time_priority"),
-                "yes_bid": yes_bid,
-                "yes_ask": yes_ask,
-                "no_bid": quote.get("no_bid"),
-                "no_ask": quote.get("no_ask"),
-                "spread": quote.get("spread"),
-            },
+            "details": details,
         },
         settings,
     )

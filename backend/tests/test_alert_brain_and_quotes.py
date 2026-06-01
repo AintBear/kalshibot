@@ -258,9 +258,44 @@ class TestPositionSizingTiers(unittest.TestCase):
         self.assertTrue(any("KXLOWTDEN blocked" in blocker for blocker in rec["blockers"]))
         self.assertEqual(rec["contracts"], 0)
 
-    def test_recommendation_uses_side_ask_for_no_entry(self):
+    def test_recommendation_uses_ask_when_paper_fill_model_is_ask(self):
         from app.services.position_sizing import recommend_alert
 
+        alert = {
+            "direction": "no",
+            "market_price": 0.205,
+            "model_prob": 0.135,
+            "yes_bid": 0.18,
+            "yes_ask": 0.23,
+            "no_bid": 0.77,
+            "no_ask": 0.82,
+            "brain_score": 90,
+            "brain_state": "paper_ready",
+            "confidence": 0.70,
+            "details": {
+                "brain": {
+                    "score": 90,
+                    "state": "paper_ready",
+                    "learned": {"trade_count": 10, "positive_clv_rate": 0.60, "recent_avg_clv": 0.03},
+                },
+            },
+        }
+
+        rec = recommend_alert(
+            alert,
+            {"paper_starting_balance": 500, "kelly_fraction": 0.25, "paper_fill_model": "ask"},
+        )
+
+        self.assertEqual(rec["fill_model"], "ask")
+        self.assertAlmostEqual(rec["limit_price_side"], 0.82, places=4)
+        self.assertAlmostEqual(rec["limit_price_yes"], 0.18, places=4)
+        self.assertAlmostEqual(rec["side_edge"], 0.045, places=4)
+
+    def test_recommendation_uses_midpoint_for_no_entry_by_default(self):
+        from app.services.position_sizing import recommend_alert
+
+        # Paper mode defaults to midpoint fill so the bot stops paying the
+        # full spread on every entry — this is the limit-order assumption.
         rec = recommend_alert(
             {
                 "direction": "no",
@@ -284,9 +319,126 @@ class TestPositionSizingTiers(unittest.TestCase):
             {"paper_starting_balance": 500, "kelly_fraction": 0.25},
         )
 
-        self.assertAlmostEqual(rec["limit_price_side"], 0.82, places=4)
-        self.assertAlmostEqual(rec["limit_price_yes"], 0.18, places=4)
-        self.assertAlmostEqual(rec["side_edge"], 0.045, places=4)
+        # Midpoint of 0.77/0.82 = 0.795 -> rounded to 0.80
+        self.assertEqual(rec["fill_model"], "midpoint")
+        self.assertAlmostEqual(rec["limit_price_side"], 0.80, places=4)
+        self.assertAlmostEqual(rec["limit_price_yes"], 0.20, places=4)
+        self.assertAlmostEqual(rec["side_bid"], 0.77, places=4)
+        self.assertAlmostEqual(rec["side_ask"], 0.82, places=4)
+        # edge improved by 2c vs ask fill (0.865 - 0.80 = 0.065)
+        self.assertAlmostEqual(rec["side_edge"], 0.065, places=4)
+
+    def test_recommendation_bid_plus_1c_fill(self):
+        from app.services.position_sizing import recommend_alert
+
+        rec = recommend_alert(
+            {
+                "direction": "no",
+                "market_price": 0.30,
+                "model_prob": 0.20,
+                "no_bid": 0.68,
+                "no_ask": 0.72,
+                "brain_score": 90,
+                "brain_state": "paper_ready",
+                "confidence": 0.70,
+                "details": {
+                    "brain": {
+                        "score": 90,
+                        "state": "paper_ready",
+                        "learned": {"trade_count": 10, "positive_clv_rate": 0.60, "recent_avg_clv": 0.03},
+                    },
+                },
+            },
+            {"paper_starting_balance": 500, "paper_fill_model": "bid_plus_1c"},
+        )
+
+        # bid 0.68 + 1c = 0.69, below ask 0.72 so used as-is
+        self.assertEqual(rec["fill_model"], "bid_plus_1c")
+        self.assertAlmostEqual(rec["limit_price_side"], 0.69, places=4)
+
+    def test_recommendation_falls_back_to_ask_when_bid_missing(self):
+        from app.services.position_sizing import recommend_alert
+
+        # No bid published -> can't model a passive fill, default to ask
+        rec = recommend_alert(
+            {
+                "direction": "no",
+                "market_price": 0.30,
+                "model_prob": 0.20,
+                "no_ask": 0.72,
+                "brain_score": 90,
+                "brain_state": "paper_ready",
+                "confidence": 0.70,
+                "details": {
+                    "brain": {
+                        "score": 90,
+                        "state": "paper_ready",
+                        "learned": {"trade_count": 10, "positive_clv_rate": 0.60, "recent_avg_clv": 0.03},
+                    },
+                },
+            },
+            {"paper_starting_balance": 500, "paper_fill_model": "midpoint"},
+        )
+
+        self.assertAlmostEqual(rec["limit_price_side"], 0.72, places=4)
+
+    def test_recommendation_blocks_paper_on_wide_spread(self):
+        from app.services.position_sizing import recommend_alert
+
+        # 50c spread (e.g. 0.37/0.87) is a real example from the live DB.
+        # Midpoint at 0.62 looks attractive but no limit-order model can
+        # realistically fill there. Paper must block too.
+        rec = recommend_alert(
+            {
+                "direction": "no",
+                "market_price": 0.13,
+                "model_prob": 0.10,
+                "no_bid": 0.37,
+                "no_ask": 0.87,
+                "brain_score": 90,
+                "brain_state": "paper_ready",
+                "confidence": 0.70,
+                "details": {
+                    "spread": 0.50,
+                    "brain": {
+                        "score": 90,
+                        "state": "paper_ready",
+                        "learned": {"trade_count": 10, "positive_clv_rate": 0.60, "recent_avg_clv": 0.03},
+                    },
+                },
+            },
+            {"paper_starting_balance": 500},
+        )
+
+        self.assertIn("wide bid/ask spread", rec["blockers"])
+
+    def test_recommendation_blocks_thin_market_when_volume_floor_enabled(self):
+        from app.services.position_sizing import recommend_alert
+
+        rec = recommend_alert(
+            {
+                "direction": "no",
+                "market_price": 0.18,
+                "model_prob": 0.08,
+                "no_bid": 0.80,
+                "no_ask": 0.82,
+                "brain_score": 90,
+                "brain_state": "paper_ready",
+                "confidence": 0.70,
+                "details": {
+                    "volume_24h": 12,
+                    "brain": {
+                        "score": 90,
+                        "state": "paper_ready",
+                        "learned": {"trade_count": 10, "positive_clv_rate": 0.60, "recent_avg_clv": 0.03},
+                    },
+                },
+            },
+            {"paper_starting_balance": 500, "min_volume_24h": 25},
+        )
+
+        self.assertTrue(any("thin market" in blocker for blocker in rec["blockers"]))
+        self.assertEqual(rec["contracts"], 0)
 
     def test_bad_paper_segment_still_allows_contracts(self):
         from app.services.position_sizing import recommend_alert

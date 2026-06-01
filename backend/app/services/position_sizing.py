@@ -52,7 +52,10 @@ def recommend_alert(alert: dict, settings: dict, explore: bool = False) -> dict:
     details = alert.get("details") or {}
     mark_yes_price = _bounded(alert.get("market_price"))
     yes_prob = _bounded(alert.get("model_prob"))
-    entry, entry_yes_price = _entry_prices(alert, details, direction, mark_yes_price)
+    fill_model = _resolve_fill_model(settings, is_paper)
+    entry, entry_yes_price, fill_meta = _entry_prices(
+        alert, details, direction, mark_yes_price, fill_model=fill_model
+    )
     side_prob = 1.0 - yes_prob if direction == "no" else yes_prob
     edge = side_prob - entry
     max_gain = max(0.0, 1.0 - entry)
@@ -102,10 +105,34 @@ def recommend_alert(alert: dict, settings: dict, explore: bool = False) -> dict:
         blockers.append("event already has an open paper trade")
     spread = details.get("spread")
     try:
-        if not is_paper and spread is not None and float(spread) >= 0.15:
+        if spread is not None and float(spread) >= 0.15:
+            # Wide spreads make limit-order fills unrealistic and market-order
+            # fills ruinously expensive. Block in paper too — there is no
+            # honest fill model that survives a 15c+ spread.
             blockers.append("wide bid/ask spread")
     except (TypeError, ValueError):
         pass
+
+    # Liquidity floor — thin markets have wide spreads, bad fills, and
+    # outsized slippage when our 1-3 contract order moves the price. The
+    # bot historically traded markets with $20 in 24h volume.
+    min_volume = float(settings.get("min_volume_24h") or 0.0)
+    if min_volume > 0:
+        vol = details.get("volume_24h")
+        try:
+            if vol is not None and float(vol) < min_volume:
+                blockers.append(f"thin market ({float(vol):.0f} 24h vol < ${min_volume:.0f} floor)")
+        except (TypeError, ValueError):
+            pass
+
+    min_oi = float(settings.get("min_open_interest") or 0.0)
+    if min_oi > 0:
+        oi = details.get("open_interest")
+        try:
+            if oi is not None and float(oi) < min_oi:
+                blockers.append(f"low open interest ({float(oi):.0f} < {min_oi:.0f} floor)")
+        except (TypeError, ValueError):
+            pass
 
     ticker_upper = (alert.get("market_ticker") or details.get("ticker") or "").upper()
     is_low_market = "LOW" in ticker_upper
@@ -243,6 +270,9 @@ def recommend_alert(alert: dict, settings: dict, explore: bool = False) -> dict:
         "tier_label": tier_label,
         "limit_price_side": limit_side,
         "limit_price_yes": limit_yes,
+        "fill_model": fill_meta.get("fill_model"),
+        "side_bid": fill_meta.get("side_bid"),
+        "side_ask": fill_meta.get("side_ask"),
         "stop_loss_price": stop_loss_price_yes,
         "take_profit_price": take_profit_price,
         "risk_budget": round(risk_budget, 2),
@@ -437,23 +467,106 @@ def _quote_value(alert: dict, details: dict, field: str) -> Optional[float]:
         return None
 
 
-def _entry_prices(alert: dict, details: dict, direction: str, mark_yes_price: float) -> Tuple[float, float]:
-    """Return side-entry price and canonical YES price for the chosen side.
+FILL_MODELS = ("ask", "midpoint", "bid_plus_1c")
+DEFAULT_PAPER_FILL_MODEL = "midpoint"
+DEFAULT_LIVE_FILL_MODEL = "ask"
+
+
+def _resolve_fill_model(settings: dict, is_paper: bool) -> str:
+    """Pick the entry-fill model.
+
+    Paper mode defaults to ``midpoint`` because the bot was historically
+    entering at the ask and bleeding the spread (-0.57c recent CLV). For
+    live mode we still default to ``ask`` so we never simulate fills that
+    we have not actually built order plumbing for.
+    """
+    if is_paper:
+        key = "paper_fill_model"
+        default = DEFAULT_PAPER_FILL_MODEL
+    else:
+        key = "live_fill_model"
+        default = DEFAULT_LIVE_FILL_MODEL
+    model = str(settings.get(key) or default).lower()
+    if model not in FILL_MODELS:
+        model = default
+    return model
+
+
+def _round_cent(value: float) -> float:
+    return round(round(value * 100) / 100.0, 4)
+
+
+def _apply_fill_model(bid: Optional[float], ask: Optional[float], model: str) -> Optional[float]:
+    """Return the realized side-entry price under the chosen fill model.
+
+    Returns None if the inputs are insufficient (caller should fall back).
+    """
+    if ask is None:
+        return None
+    if bid is None or bid <= 0:
+        # No bid published — only the ask is realistic.
+        return _bounded(_round_cent(ask))
+    if ask < bid:
+        # Crossed book or stale quote — treat as ask.
+        return _bounded(_round_cent(ask))
+    if model == "ask":
+        return _bounded(_round_cent(ask))
+    if model == "bid_plus_1c":
+        # Post a passive bid one cent above the resting bid.
+        cand = min(ask, bid + 0.01)
+        return _bounded(_round_cent(cand))
+    # midpoint (default for paper). Bias 1c toward the ask on penny rounding
+    # so we never claim a sub-bid fill — the queue at bid still has to clear.
+    mid = (bid + ask) / 2.0
+    rounded = _round_cent(mid)
+    if rounded <= bid:
+        rounded = _round_cent(bid + 0.01)
+    if rounded > ask:
+        rounded = _round_cent(ask)
+    return _bounded(rounded)
+
+
+def _entry_prices(
+    alert: dict,
+    details: dict,
+    direction: str,
+    mark_yes_price: float,
+    fill_model: str = "ask",
+) -> Tuple[float, float, dict]:
+    """Return side-entry price, canonical YES price, and fill metadata.
 
     Trades are stored as YES-price coordinates so settlement math remains
-    consistent. For buying, the realistic side cost is the ask: YES ask for a
-    YES buy, NO ask for a NO buy.
+    consistent. The historical default was ``ask`` (pay the spread on every
+    fill); the new paper default is ``midpoint`` (model a passive limit
+    order that fills near the middle of the book).
     """
     if direction == "no":
-        no_ask = _quote_value(alert, details, "no_ask")
-        side_entry = no_ask if no_ask is not None else 1.0 - mark_yes_price
-        yes_entry = 1.0 - side_entry
+        bid = _quote_value(alert, details, "no_bid")
+        ask = _quote_value(alert, details, "no_ask")
     else:
-        yes_ask = _quote_value(alert, details, "yes_ask")
-        side_entry = yes_ask if yes_ask is not None else mark_yes_price
-        yes_entry = side_entry
+        bid = _quote_value(alert, details, "yes_bid")
+        ask = _quote_value(alert, details, "yes_ask")
 
-    return _bounded(side_entry), _bounded(yes_entry)
+    realized = _apply_fill_model(bid, ask, fill_model)
+    if realized is None:
+        if direction == "no":
+            realized = 1.0 - mark_yes_price
+        else:
+            realized = mark_yes_price
+        used_model = "fallback"
+    else:
+        used_model = fill_model
+
+    side_entry = _bounded(realized)
+    yes_entry = _bounded(1.0 - side_entry) if direction == "no" else side_entry
+
+    meta = {
+        "fill_model": used_model,
+        "side_bid": _bounded(bid) if bid is not None else None,
+        "side_ask": _bounded(ask) if ask is not None else None,
+        "side_entry": side_entry,
+    }
+    return side_entry, yes_entry, meta
 
 
 def _adaptive_exit_prices(

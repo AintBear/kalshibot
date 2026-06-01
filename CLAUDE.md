@@ -1,12 +1,15 @@
 # KalshiBot - Project Instructions
 
-## Bot Status (updated 2026-05-29, session 13 — verified from DB/runtime)
+## Bot Status (updated 2026-06-01, session 17 — verified from live API + DB)
 
-**Overall realized P&L: -$76.36** on 567 real `market_closed` settlements | **Strategy zone P&L: +$25.61** on 256 NO 20-40c bracket trades (blocked cities + explore excluded) | **77 open paper trades** (47 strategy, 30 legacy explore) | **Brain score: 71**
+**Overall realized P&L: -$75.92** on 655 real `market_closed` settlements | **Strategy zone P&L: +$23.51** on 310 NO 20-40c bracket trades | **30 open paper trades** | **Brain score: 82** | **Biggest score gap: `clv +6.48` (blended CLV +0.68c, max at +5c)** | **138 tests pass**
+
+**Sessions 15 + 16 shipped six engineering changes targeting the recent-30 CLV gate.** Every item from the original 6-point improvement list is in: limit-order fills (paper midpoint default), intraday temperature observations, slice-aware calibration (with session-4-disaster safeguards), ECMWF as third weather source, liquidity floor on volume, and a brain score breakdown so the gap to 90 is visible. Nothing is queued. **Forward validation is the only remaining work.**
 
 ### What's actually true
 
-- The bot is running from `/Users/AintBear/Projects/kalshibot` with a launchd watchdog installed. Latest verified scan processed 539/539 markets with 0 series errors. Watchdog last exit code was 0 and live auto remains off.
+- The bot is running from `/Users/AintBear/Projects/kalshibot` with a launchd watchdog installed. Latest verified scan processed **535/535 markets with 0 series errors, 345 alerts, 30 paper trades created**. Watchdog last exit code 0. Live auto remains off (`live_blocker: "paper trading is still on"`).
+- Codex's session-11 handoff snapshot showed `markets_found=4 / series_errors=62` — that was a transient DNS/Kalshi blip that auto-recovered on the next 15-minute scheduled scan. Verified by direct `/api/scan/diagnose?series=KXHIGHNY` returning 200 from both Kalshi base URLs.
 - New paper entries are strict-strategy only. `paper_learning_explore_enabled` is now false in the local runtime and in `config/settings.example.json`; the 30 open explore trades are legacy held-out diagnostics and should not affect strategy learning.
 - Manual paper clicks now force a live Kalshi quote refresh before writing a paper fill. Open paper marks refresh all open paper trades, not only trades with stop/target exits. UI marks open positions at the exit bid and labels spread cost explicitly.
 - Manual learning override no longer bypasses recommendation blockers. YES blockers, no sub-20c blockers, no 85c+ blockers, and other strategy blockers stay active even when the user clicks a manual paper button.
@@ -45,6 +48,131 @@ Each session, do exactly two things from this priority list (top = highest impac
 5. **Infrastructure** — Tests, monitoring, deployment reliability.
 
 After each session, update the status table above and note what changed.
+
+## What Was Done (2026-06-01, session 17 — Claude/Opus)
+
+User confirmed they're moving off the Mac/PC and onto a paid VPS. Shipped the Fly.io deploy path + a Codex handoff doc.
+
+### Fly.io deployment artifacts
+
+- **`fly.toml`** at repo root. App name `sibylla-kalshibot`, region `iad`, shared-cpu-1x with 512MB. Two persistent volumes mounted at `/app/data` and `/app/config`. `auto_stop_machines = "off"` and `min_machines_running = 1` because the bot's whole job is the scheduled scan loop — letting Fly idle the machine kills it. Healthcheck hits `/health` every 30s, which now correctly 503s on scan errors per session 14.
+- **`scripts/fly-bootstrap-secrets.sh`** uploads `config/settings.json` + `config/kalshi_private_key.pem` via SFTP into the persistent config volume. NOT stored as Fly secrets — that way they can be rotated via SSH without redeploying.
+- **`scripts/fly-deploy.sh`** is the day-2 command: rebuild, deploy, sweep `/health` and a couple of endpoints, print the brain score breakdown. Use after `git push`.
+- **`DEPLOYMENT.md` rewritten** as a real Fly.io guide with the exact 7-step first-time setup, day-2 deploys, log/SSH/key-rotation commands, and the "exactly one replica because SQLite is single-writer" constraints that apply to every host.
+- **Cost**: $0–$7/mo. Fly's free allowance currently covers this footprint.
+- **Not done**: frontend deployment (still local), GitHub Actions auto-deploy on main. Both flagged in DEPLOYMENT.md and the handoff doc; deferred until user decides.
+
+### Codex handoff doc
+
+**`CODEX_HANDOFF.md`** at repo root. The running handoff between Codex and Claude. Lists:
+
+1. PR #2 review prompts to verify (sessions 14, 15, 16 — three separate comment threads on the same PR)
+2. Fly.io deployment help if user invokes Codex with Fly credentials available
+3. Live limit-order management in `order_manager.py` (deferred until forward-validation passes)
+4. Forward-validation checkpoint at ~30 fresh settlements (brain breakdown shows the answer in real time)
+5. Slice calibration sanity-check once any slice crosses 20 samples
+6. AccuWeather doc/code reconciliation (low priority, not blocking)
+
+Also documents the coordination protocol: each session opens a PR with explicit numbered review prompts, the other agent verifies and posts findings as a PR comment, no silent merges.
+
+### Cross-agent coordination is live
+
+- PR #1 (Codex session 11): OPEN, Claude has commented with the 4-point verification — all four passed.
+- PR #2 (Claude sessions 14–16, stacked on Codex's branch): OPEN with 3 explicit Codex review-prompt comments for the 14/15/16 layers.
+- Both PRs against `main`, Codex's stacks under Claude's. Land order is #1 first, then #2.
+- Repo: <https://github.com/AintBear/kalshibot>
+
+## What Was Done (2026-06-01, session 16 — Claude/Opus)
+
+The user wanted the remaining four queued items built rather than left as TODOs. All four shipped:
+
+### Liquidity floor (#5)
+- New settings `min_volume_24h` (default $25) and `min_open_interest` (default 0, off until OI history is more complete) in `backend/app/config.py` + `config/settings.example.json`.
+- `backend/app/services/scanner.py` now plumbs `open_interest` through to the alert details so the blocker can see it.
+- `backend/app/services/position_sizing.py` adds two new blockers: `thin market (X 24h vol < $Y floor)` and `low open interest (X < Y floor)`. Skips trades that survive every other filter but settle into wide-spread, hard-to-fill markets.
+
+### ECMWF as third weather source (#4)
+- New `_fetch_ecmwf_forecast()` + `_extract_ecmwf_forecast()` in `weather_model.py`. Hits Open-Meteo with `models=ecmwf_ifs025` — independent European model, completely different physics from NWS/GFS.
+- `_merge_forecasts()` takes a 4th source and weights NWS 0.60, AccuWeather 0.40, Open-Meteo 0.40, ECMWF 0.40 (NWS preserved as official settlement source). Source disagreement signal now reflects three-way disagreement when present.
+- New setting `ecmwf_enabled` (default true). Verified live: scoring Austin HIGH B92.5 returns `forecast_sources: ['NWS', 'AccuWeather', 'Open-Meteo', 'ECMWF']`.
+- Cached 30 min per (lat, lon), matching Open-Meteo's existing cache.
+
+### Brain score 82-vs-90 audit (#9)
+- **Diagnosis**: gap is real, no scoring quirk. 4 of 7 components are already maxed (samples, positive_rate, segments, prediction). The 18 missing points sit entirely in the three CLV/P&L components, and 90% of that gap is recent-window — exactly the metrics #1 (limit fills) and #2 (intraday obs) target.
+- **Code**: `_compute_brain_score_breakdown()` now returns per-component `value/max/headroom/detail` + `biggest_gap`. Exposed on `/api/brain/status` as `score_breakdown`. Live API verified: `BIGGEST GAP: clv +6.48 (blended CLV +0.68c, max at +5c)`.
+- Original `_compute_brain_score()` is now a thin wrapper so nothing downstream breaks.
+
+### Slice-aware calibration (#3, the risky one)
+- **Re-enabled `_apply_calibration()`** with three hard safeguards that prevent the session-4 disaster (LV +0.62 bias from 5 samples):
+  1. **Min 20 samples** per (city, market_type) slice before any application.
+  2. **Bias clamped at ±0.15** — even with thousands of samples, a single slice cannot shift model_prob by more than 15 percentage points.
+  3. **Sample-count ramp** from 50% weight at 20 samples to 100% at 50 samples.
+- **Fixed the circular-calibration trap** in `update_model_calibration()`: now uses `raw_model_prob` from alert details (not post-cal `model_prob`), explicitly excludes explore-mode trades, persists biases for slices below the apply threshold so the UI can show progress.
+- Wired into the scheduler — runs at startup and every learning refresh.
+- In-process cache (10 min TTL) keyed by (city, market_type) so per-alert lookup stays cheap.
+- Live verification: 10 slices in `model_calibration` table, biases ranging +0.03 (MIN) to +0.50 (LV). All currently below the 20-sample threshold so nothing applies yet — exactly the conservative-by-default behavior we want. As trades settle, slices will cross the floor and start contributing.
+
+### Tests
+- 21 new tests across `test_slice_calibration_and_brain_breakdown.py` (8) and earlier-session test files. **138/138 pass.**
+- The brain breakdown test pins the live-runtime score (82) to lock against any regression that breaks the formula.
+- The calibration safeguard tests pin the +0.62 LV case: would have shifted model_prob by +0.62 in old code, now clamps to applied_bias of +0.15.
+
+### End-to-end runtime verification
+- `/health` → ok, no issues
+- `/api/brain/status` → score 82, breakdown shows `clv` is the biggest gap at +6.48
+- `/api/scan/status` → 535/535, 0 errors, 30 paper trades created
+- Score one live Austin alert: `forecast_sources: NWS+AccuWeather+Open-Meteo+ECMWF`, intraday observation `observed_high=89.2 at hour 14`, calibration `applied=False, samples=19, min_samples=20` (one sample below threshold — calibration starts firing next week as settlements accumulate)
+
+### What this leaves
+
+Nothing queued. Every item from the original 6-point list (limit fills, intraday temps, slice calibration, ECMWF, liquidity floor, brain audit) is shipped. The remaining work is **forward validation** — wait 30–50 settlements under these rules and see if recent-30 CLV crosses zero. The brain breakdown will tell you in real time exactly how close you are.
+
+## What Was Done (2026-06-01, session 15 — Claude/Opus)
+
+The user pushed back on the session-14 "just wait for settlements" answer and was right to. Recent-30 expectancy is negative because the bot is **paying the spread on every fill** and is **forecast-blind**. Both are fixable engineering, not patience problems.
+
+### What changed
+
+- **Fill model switched from ask to midpoint for paper.** `backend/app/services/position_sizing.py` `_entry_prices()` now accepts a `fill_model` of `"ask" | "midpoint" | "bid_plus_1c"` and the paper default is now `midpoint`. New setting `paper_fill_model` (default `midpoint`) and `live_fill_model` (default `ask` until live limit-order plumbing exists). Recommendation result now carries `fill_model`, `side_bid`, `side_ask` so trades can be sliced by fill model later. Verified against live alerts: on a 12¢-spread market entry moved from 0.37 → 0.31 (midpoint) → 0.26 (bid+1c). On a 1¢-spread market all three converge — no false improvement.
+- **Wide-spread blocker now applies to paper too.** Was previously live-only at 15¢; paper would happily enter 50¢-spread markets and pay the ask. No fill model survives a 50¢ spread.
+- **Intraday temperature injection (`backend/app/services/intraday_temps.py`).** New module fetches today's hourly observed temps from Open-Meteo (free, no key), computes `observed_high_so_far` / `observed_low_so_far` / `current_temp` / `local_hour`, caches per (lat, lon, date) for 10 minutes. `weather_model.score_market` now calls it for non-precipitation markets and passes the observation through to `_temp_market_prob`.
+- **Conservative observation override (`_apply_intraday_observation`).** Fires only when the signal is iron-clad: bracket already exceeded → near-zero; threshold already cleared → near-certain; late-day-and-inside-bracket → boosted to 0.83. Otherwise leaves the forecast probability untouched. Late = local hour ≥ 17 for HIGH, ≥ 10 for LOW. Verified live: Chicago observed 72° vs forecast 69.8° at 14:00 — no override yet (correct, still mid-afternoon).
+- **`raw_forecast_prob` + `intraday_observation` exposed on the scored result** so the UI and audit queries can see exactly when the observation moved the model.
+- **12 new tests** (`test_intraday_temps.py` + 5 fill-model tests in `test_alert_brain_and_quotes.py`). Existing `test_recommendation_uses_side_ask_for_no_entry` updated to reflect the new midpoint default; the original ask-mode behavior is preserved by passing `paper_fill_model: "ask"`.
+- **129/129 tests pass.**
+
+### What this should fix
+
+CLV is recent-30 −0.57¢. About 1–4¢ of that is bot paying the ask instead of working a limit. Switching to midpoint should add roughly 1–5¢ of side-edge per filled trade depending on spread, which directly improves the recent-window expectancy gate. The intraday observation override won't fire on most trades but will save the bot from entering NO on a HIGH bracket the city already cleared by mid-afternoon — those were the worst-CLV losers because they were essentially already resolved against us.
+
+### What this does NOT fix
+
+- Paper-midpoint fills are an **optimistic** simulation of live limit orders. Real live mode still needs an order-management layer in `order_manager.py` that posts at bid+1¢, cancels/re-posts as quotes move, and crosses if the alert is about to expire. That work is queued as task #10 follow-up.
+- Intraday override is binary on the iron-clad cases. The softer case — observation suggests the forecast is too low/high — is not modeled because the right adjustment depends on diurnal headroom estimates we don't have yet.
+- AccuWeather is still in the code path. CLAUDE.md sessions 7/13 are inconsistent about its status; runtime shows `accuweather_cache.status=live` so it's working but the system already falls back to NWS + Open-Meteo when it isn't.
+
+### Deferred (saved as TaskCreate IDs #6-#9)
+
+- Slice-aware calibration (per city + segment) — replace the global isotonic guard with a slice table.
+- Add ECMWF as 3rd weather source — Open-Meteo serves it free; would give real source-disagreement signal.
+- Liquidity floor — skip markets with low open interest before the spread/edge check.
+- Brain score 82-vs-90 gap audit — identify which component prevents the live gate and whether the gap is real.
+
+## What Was Done (2026-06-01, session 14 — Claude/Opus)
+
+- **Verified Codex's session 11-13 work end-to-end against live runtime.** All claims hold: paper-only, brain 82 (was 71 at session 13 — climbed since), 30 open paper trades (was 77 — opens cleared cleanly), recent-30 expectancy still negative, entry_quality_ok=false, live auto off. Settlements grew from 567 → 655 in the intervening 3 days with the strategy-zone P&L holding positive (+$23.51 on 310 trades, 74.8% accuracy).
+- **Hardened `backend/app/routers/health.py`.** Codex's handoff flagged that `/health` returned `ok` even when the scanner had 62 series errors. The endpoint now also checks scan freshness (>45min stale → degraded), running-scan stuck (>20min → degraded), all-series-failed (→ degraded), and **scan error rate ≥ 25% of series total** (→ degraded). All four return HTTP 503 so Docker's `curl -f` healthcheck and the launchd watchdog both see the failure.
+- **Tightened `scripts/watchdog.sh`.** Added `scan_high_error_rate` decision (matching the new health threshold). Routed both `scan_stuck` and `scan_high_error_rate` to **backend restart**, not just a scan re-trigger — the failure mode in sessions 8 and 9 was stuck DNS / virtiofs corruption inside the long-running uvicorn process, and only a restart fixes it. Smoke-tested decision function against Codex's failure scenario (62/62 errors + 4 markets) and against synthetic 25% / all-failed cases.
+- **Replaced stale `README.md` portfolio numbers.** Header table was still claiming "566 settled / 0 open / +$30.79 strategy / 77.1% accuracy" from session 9. Replaced with verified live values, a `Mode: paper only` row, an explicit `Recent-30 expectancy is failing → live gate off` row, and a new `Safeguards` section that enumerates every iron-law and soft blocker so anyone reading the GitHub can see the live gate is on by design.
+- **Documented always-on deployment options honestly.** README now lists three paths in reliability order: (1) small VPS as the recommended serious option, (2) Windows + WSL2 + Task Scheduler, (3) the current macOS watchdog setup, with explicit acknowledgment that a sleeping Mac is a dead bot.
+- **Did not change.** Strategy blockers, sigma, calibration, brain scoring, automation cadence, settlement logic, manual-override enforcement. Codex's session 10-13 work covers those and I didn't see evidence the bot was wrong about any of them. The only mismatch CLAUDE.md→reality I noticed (AccuWeather "expired" doc vs `accuweather_cache.status=live` runtime) is benign — the cache is live, the system already falls back when it isn't, and Codex's session-13 status row correctly says `NWS + Open-Meteo + AccuW`.
+- **What I did NOT verify forward.** The strategy-zone +$23.51 / 74.8% slice is still based on a mix of historical and recent settlements. Recent-30 P&L is -$0.54, recent-30 CLV is -0.57c. That gap is the reason `entry_quality_ok` stays false. Do not raise that flag artificially — it's the only thing keeping the live gate honest.
+
+### Codex handoff items still pending (for next session)
+
+- **Move runtime off the Mac.** Codex flagged this and I agree it's now the top infra risk. While SQLite is the DB, exactly one backend replica runs. A small VPS with a persistent volume mounting `/app/data` and `/app/config` is the cleanest answer. Cost: ~$5/mo.
+- **Calibration coverage.** Isotonic is at identity because 82.8% of raw probabilities sit in one 0.1 bucket. Need wider input spread before the calibration layer can do real work. Codex session 11 already prevented the buggy global rebuild — leaving identity is the right move for now.
+- **Forward-validate the 30 strategy entries from the latest scan.** Wait for settlement before relaxing any blockers.
 
 ## What Was Done (2026-05-29, session 13 — Codex)
 
