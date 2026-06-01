@@ -5,8 +5,9 @@
 #   fly launch --copy-config --no-deploy   # first time only; accept the existing fly.toml
 #   fly volumes create sibylla_data --region iad --size 1
 #   fly volumes create sibylla_config --region iad --size 1
-#   scripts/fly-bootstrap-secrets.sh       # uploads kalshi key + settings
-#   fly deploy
+#   fly deploy                            # creates the first Machine with automation off by default
+#   scripts/fly-bootstrap-secrets.sh      # uploads Kalshi key + settings
+#   fly machine restart --app sibylla-kalshibot
 #
 # This runs ONE backend instance because the database is SQLite (single
 # writer). Never auto-scale this past 1.
@@ -15,7 +16,7 @@ app = "sibylla-kalshibot"
 primary_region = "iad"
 
 [build]
-  dockerfile = "backend/Dockerfile"
+  dockerfile = "Dockerfile.fly"
 
 [env]
   ENVIRONMENT = "production"

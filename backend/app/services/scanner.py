@@ -698,17 +698,7 @@ def _process_market(
             "brain_score": brain["score"],
             "brain_state": brain["state"],
             "phantom_risk_level": result["phantom_risk_level"],
-            "details": {
-                "brain": brain,
-                "event_has_open_trade": event_has_open_trade,
-                "hours_to_close": result.get("hours_to_close"),
-                "time_priority": result.get("time_priority"),
-                "yes_bid": yes_bid,
-                "yes_ask": yes_ask,
-                "no_bid": quote.get("no_bid"),
-                "no_ask": quote.get("no_ask"),
-                "spread": quote.get("spread"),
-            },
+            "details": details,
         },
         settings,
     )

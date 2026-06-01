@@ -8,6 +8,7 @@ BACKEND_URL="${KALSHIBOT_BACKEND_URL:-http://127.0.0.1:8000}"
 MAX_SCAN_AGE_MIN="${KALSHIBOT_MAX_SCAN_AGE_MIN:-45}"
 MAX_RUNNING_SCAN_MIN="${KALSHIBOT_MAX_RUNNING_SCAN_MIN:-20}"
 SCAN_ERROR_RATE_THRESHOLD="${KALSHIBOT_SCAN_ERROR_RATE_THRESHOLD:-0.25}"
+SCAN_RESTART_COOLDOWN_MIN="${KALSHIBOT_SCAN_RESTART_COOLDOWN_MIN:-20}"
 LOG_DIR="${KALSHIBOT_WATCHDOG_LOG_DIR:-$REPO_DIR/logs}"
 DRY_RUN=0
 
@@ -17,6 +18,7 @@ fi
 
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/watchdog.log"
+SCAN_RESTART_MARKER_FILE="$LOG_DIR/watchdog.scan_restart"
 
 log() {
   printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" | tee -a "$LOG_FILE"
@@ -78,10 +80,36 @@ json_field() {
 }
 
 health_ok() {
-  local body status
-  body="$(fetch_json "$BACKEND_URL/health" 2>/dev/null)" || return 1
-  status="$(printf '%s' "$body" | json_field status 2>/dev/null)" || return 1
-  [[ "$status" == "ok" ]]
+  [[ "$(health_decision)" == "health_ok" ]]
+}
+
+health_decision() {
+  local body
+  body="$(curl -sS --max-time 10 "$BACKEND_URL/health" 2>/dev/null)" || {
+    printf 'backend_unreachable'
+    return 0
+  }
+  HEALTH_JSON="$body" python3 - <<'PY'
+import json
+import os
+
+try:
+    data = json.loads(os.environ.get("HEALTH_JSON", ""))
+except Exception:
+    print("health_unreadable")
+    raise SystemExit(0)
+
+status = data.get("status")
+issues = [str(issue) for issue in (data.get("issues") or [])]
+if status == "ok" and not issues:
+    print("health_ok")
+elif issues and all(issue.startswith("scan_") for issue in issues):
+    # Scan degradation is handled below by scan_decision(), which can decide
+    # whether to restart, trigger a fresh scan, or wait out an active scan.
+    print("scan_degraded")
+else:
+    print("backend_degraded")
+PY
 }
 
 scan_decision() {
@@ -149,6 +177,49 @@ else:
 PY
 }
 
+scan_marker() {
+  local payload="$1"
+  SCAN_STATUS_JSON="$payload" python3 - <<'PY'
+import json
+import os
+
+try:
+    data = json.loads(os.environ.get("SCAN_STATUS_JSON", ""))
+except Exception:
+    raise SystemExit(0)
+
+marker = data.get("completed_at") or data.get("started_at") or data.get("_persisted_updated_at") or ""
+print(str(marker))
+PY
+}
+
+scan_restart_allowed() {
+  local decision="$1"
+  local marker="$2"
+  local now last_decision last_marker last_epoch
+
+  if [[ -z "$marker" || ! -f "$SCAN_RESTART_MARKER_FILE" ]]; then
+    return 0
+  fi
+
+  IFS=$'\t' read -r last_decision last_marker last_epoch <"$SCAN_RESTART_MARKER_FILE" || return 0
+  now="$(date +%s)"
+
+  if [[ "$last_decision" == "$decision" && "$last_marker" == "$marker" ]]; then
+    return 1
+  fi
+  if [[ "$last_epoch" =~ ^[0-9]+$ ]] && (( now - last_epoch < SCAN_RESTART_COOLDOWN_MIN * 60 )); then
+    return 1
+  fi
+  return 0
+}
+
+record_scan_restart() {
+  local decision="$1"
+  local marker="$2"
+  printf '%s\t%s\t%s\n' "$decision" "$marker" "$(date +%s)" >"$SCAN_RESTART_MARKER_FILE"
+}
+
 trigger_scan() {
   if [[ "$DRY_RUN" == "1" ]]; then
     log "DRY_RUN POST $BACKEND_URL/api/scan/weather"
@@ -197,17 +268,30 @@ main() {
   ensure_docker || exit 1
   compose_up
 
-  if ! health_ok; then
-    log "Backend health failed; restarting backend"
-    restart_backend
-  fi
+  local health_state
+  health_state="$(health_decision)"
+  case "$health_state" in
+    health_ok)
+      ;;
+    scan_degraded)
+      log "Backend reachable but scan health is degraded; deferring to scan decision"
+      ;;
+    backend_unreachable|backend_degraded|health_unreadable)
+      log "Backend health failed ($health_state); restarting backend"
+      restart_backend
+      health_state="$(health_decision)"
+      if [[ "$health_state" != "health_ok" && "$health_state" != "scan_degraded" ]]; then
+        log "ERROR backend health still failed after restart: $health_state"
+        exit 1
+      fi
+      ;;
+    *)
+      log "Unknown health decision: $health_state; restarting backend"
+      restart_backend
+      ;;
+  esac
 
-  if ! health_ok; then
-    log "ERROR backend health still failed after restart"
-    exit 1
-  fi
-
-  local scan_status decision poke_auto_entry
+  local scan_status decision poke_auto_entry marker
   poke_auto_entry=1
   scan_status="$(fetch_json "$BACKEND_URL/api/scan/status" 2>/dev/null)" || scan_status=""
   decision="$(scan_decision "$scan_status" 2>/dev/null || printf 'scan_unreadable')"
@@ -215,8 +299,14 @@ main() {
 
   case "$decision" in
     scan_stuck|scan_high_error_rate)
-      log "Scan unhealthy ($decision); restarting backend"
-      restart_backend
+      marker="$(scan_marker "$scan_status" 2>/dev/null || true)"
+      if scan_restart_allowed "$decision" "$marker"; then
+        log "Scan unhealthy ($decision); restarting backend"
+        restart_backend
+        record_scan_restart "$decision" "$marker"
+      else
+        log "Scan unhealthy ($decision) but restart suppressed for marker=$marker cooldown=${SCAN_RESTART_COOLDOWN_MIN}m"
+      fi
       poke_auto_entry=0
       ;;
     scan_missing|scan_stale|scan_failed|scan_unreadable)

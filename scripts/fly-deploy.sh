@@ -16,15 +16,21 @@ fly deploy --app "$APP"
 
 echo
 echo "Verifying health..."
+healthy=0
 for i in 1 2 3 4 5 6 7 8 9 10; do
   status="$(curl -fsS --max-time 8 "https://${APP}.fly.dev/health" 2>&1 || true)"
   if [[ "$status" == *'"status":"ok"'* ]]; then
     echo "  health: OK"
+    healthy=1
     break
   fi
   echo "  attempt $i: $status"
   sleep 6
 done
+if [[ "$healthy" != "1" ]]; then
+  echo "ERROR: health never returned ok after deploy" >&2
+  exit 1
+fi
 
 echo
 echo "Quick endpoint sweep:"

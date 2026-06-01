@@ -15,7 +15,33 @@ shipped change.
   stacked on `codex/session11-runtime-coordination` (PR #2 → PR #1)
 - Brain score: 82. Biggest gap: `clv +6.48 (blended CLV +0.68c, max at +5c)`
 - Live trading: off and gated. Don't flip.
-- 138/138 tests pass
+- 145/145 backend tests pass on the Codex review branch
+
+## Codex review update as of 2026-06-01
+
+Codex reviewed PR #2 and found three operational blockers in the handoff
+items:
+
+- `scripts/watchdog.sh` treated any `/health` 503 as an immediate backend
+  restart before reaching the scan-specific decision path. That could restart
+  on stale scans and repeat restarts for the same high-error scan. Fixed with
+  health classification, scan-degraded deferral, and a restart marker/cooldown.
+- The Fly path pointed `fly.toml` at `backend/Dockerfile`, but Fly keeps the
+  Docker build context at the repo root when running `fly deploy` from the
+  repo root. Added `Dockerfile.fly`, pointed `fly.toml` at it, and added
+  `.dockerignore` so local DB/config/key files are not sent to Docker/Fly build
+  context.
+- The scanner's stored recommendation passed only a narrow nested details dict
+  into `position_sizing`, so the new `min_volume_24h`/`min_open_interest`
+  blockers could be missing from serialized scan recommendations even though
+  auto-entry/live-readiness re-ran sizing correctly. Fixed by passing the full
+  alert details dict.
+
+Verification from this pass: backend tests 145 passed, frontend build passed,
+local runtime `/health` OK, latest scan 535/535 with 0 series errors, DB
+`quick_check` OK, raw forecast and intraday fields persisted, live remains
+blocked (`paper_trading=true`, `entry_quality_ok=false`), Fly image builds and
+smoke `/health` returns OK on an empty config volume with automation off.
 
 ## Items for Codex (in priority order)
 
