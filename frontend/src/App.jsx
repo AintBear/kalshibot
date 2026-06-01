@@ -106,6 +106,18 @@ class RouteErrorBoundary extends React.Component {
   }
 }
 
+function NotFound() {
+  return (
+    <div className="empty route-error">
+      <strong>Page not found.</strong>
+      <span>This route is not part of Sibylla.</span>
+      <NavLink className="btn btn-primary btn-sm" to="/">
+        Back to Dashboard
+      </NavLink>
+    </div>
+  )
+}
+
 export default function App() {
   const location = useLocation()
   const [online, setOnline]         = useState(null)
@@ -247,6 +259,7 @@ export default function App() {
             <Route path="/trades"      element={<Trades />} />
             <Route path="/settings"    element={<Settings />} />
             <Route path="/glossary"    element={<Glossary />} />
+            <Route path="*"            element={<NotFound />} />
           </Routes>
         </RouteErrorBoundary>
       </main>

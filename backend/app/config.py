@@ -22,11 +22,11 @@ _defaults = {
     "paper_learning_explore_max_per_scan": 3,
     "paper_learning_explore_max_open": 30,
     # Fill model controls how entry_price is computed from the live order book.
-    # paper: "midpoint" simulates a passive limit order; switch to "ask" to
-    # reproduce the legacy spread-paying behavior. live: stays "ask" until the
-    # live limit-order management plumbing in order_manager.py lands.
-    "paper_fill_model": "midpoint",
-    "live_fill_model": "ask",
+    # paper/live: "bid_plus_1c" posts a passive limit one cent above the
+    # resting bid instead of crossing the ask. Switch to "ask" to reproduce the
+    # legacy spread-paying behavior, or "midpoint" for faster paper sampling.
+    "paper_fill_model": "bid_plus_1c",
+    "live_fill_model": "bid_plus_1c",
     # Intraday observed-temperature injection. When true, weather_model checks
     # what temperature has already been observed for the city today and uses
     # it to sharpen the model probability (e.g. if a HIGH bracket has already

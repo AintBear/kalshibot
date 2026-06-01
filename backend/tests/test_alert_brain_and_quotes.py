@@ -291,11 +291,11 @@ class TestPositionSizingTiers(unittest.TestCase):
         self.assertAlmostEqual(rec["limit_price_yes"], 0.18, places=4)
         self.assertAlmostEqual(rec["side_edge"], 0.045, places=4)
 
-    def test_recommendation_uses_midpoint_for_no_entry_by_default(self):
+    def test_recommendation_uses_passive_bid_plus_1c_for_no_entry_by_default(self):
         from app.services.position_sizing import recommend_alert
 
-        # Paper mode defaults to midpoint fill so the bot stops paying the
-        # full spread on every entry — this is the limit-order assumption.
+        # Paper mode defaults to a passive limit one cent above the resting bid
+        # so new paper entries do not pay the full spread immediately.
         rec = recommend_alert(
             {
                 "direction": "no",
@@ -319,14 +319,12 @@ class TestPositionSizingTiers(unittest.TestCase):
             {"paper_starting_balance": 500, "kelly_fraction": 0.25},
         )
 
-        # Midpoint of 0.77/0.82 = 0.795 -> rounded to 0.80
-        self.assertEqual(rec["fill_model"], "midpoint")
-        self.assertAlmostEqual(rec["limit_price_side"], 0.80, places=4)
-        self.assertAlmostEqual(rec["limit_price_yes"], 0.20, places=4)
+        self.assertEqual(rec["fill_model"], "bid_plus_1c")
+        self.assertAlmostEqual(rec["limit_price_side"], 0.78, places=4)
+        self.assertAlmostEqual(rec["limit_price_yes"], 0.22, places=4)
         self.assertAlmostEqual(rec["side_bid"], 0.77, places=4)
         self.assertAlmostEqual(rec["side_ask"], 0.82, places=4)
-        # edge improved by 2c vs ask fill (0.865 - 0.80 = 0.065)
-        self.assertAlmostEqual(rec["side_edge"], 0.065, places=4)
+        self.assertAlmostEqual(rec["side_edge"], 0.085, places=4)
 
     def test_recommendation_bid_plus_1c_fill(self):
         from app.services.position_sizing import recommend_alert
@@ -355,6 +353,34 @@ class TestPositionSizingTiers(unittest.TestCase):
         # bid 0.68 + 1c = 0.69, below ask 0.72 so used as-is
         self.assertEqual(rec["fill_model"], "bid_plus_1c")
         self.assertAlmostEqual(rec["limit_price_side"], 0.69, places=4)
+
+    def test_live_recommendation_uses_passive_bid_plus_1c_by_default(self):
+        from app.services.position_sizing import recommend_alert
+
+        rec = recommend_alert(
+            {
+                "direction": "no",
+                "market_price": 0.30,
+                "model_prob": 0.20,
+                "no_bid": 0.68,
+                "no_ask": 0.72,
+                "brain_score": 90,
+                "brain_state": "paper_ready",
+                "confidence": 0.70,
+                "details": {
+                    "brain": {
+                        "score": 90,
+                        "state": "paper_ready",
+                        "learned": {"trade_count": 10, "positive_clv_rate": 0.60, "recent_avg_clv": 0.03},
+                    },
+                },
+            },
+            {"paper_trading": False, "paper_starting_balance": 500},
+        )
+
+        self.assertEqual(rec["fill_model"], "bid_plus_1c")
+        self.assertAlmostEqual(rec["limit_price_side"], 0.69, places=4)
+        self.assertAlmostEqual(rec["limit_price_yes"], 0.31, places=4)
 
     def test_recommendation_falls_back_to_ask_when_bid_missing(self):
         from app.services.position_sizing import recommend_alert
