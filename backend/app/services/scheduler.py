@@ -150,6 +150,12 @@ def _startup_job():
         logger.info("Startup: isotonic calibration rebuild: %s", cal_result)
     except Exception as e:
         logger.error("Startup isotonic calibration error: %s", e)
+    try:
+        from app.services.weather_model import update_model_calibration
+        slice_result = update_model_calibration()
+        logger.info("Startup: slice calibration rebuild: %s", slice_result)
+    except Exception as e:
+        logger.error("Startup slice calibration error: %s", e)
     _learning_refresh_job()
     _auto_entry_job()
     if not _automation_enabled():
@@ -219,14 +225,27 @@ def _learning_refresh_job():
             cal_result = rebuild_isotonic_calibration()
         except Exception as cal_exc:
             logger.warning("Isotonic calibration rebuild failed: %s", cal_exc)
+        slice_cal_result = {}
+        try:
+            from app.services.weather_model import update_model_calibration
+            slice_cal_result = update_model_calibration()
+        except Exception as slice_exc:
+            logger.warning("Slice calibration rebuild failed: %s", slice_exc)
         logger.info(
-            "Learning refresh complete: backfill=%s cross_ref=%s rebuilt_segments=%d calibration=%s",
+            "Learning refresh complete: backfill=%s cross_ref=%s rebuilt_segments=%d isotonic=%s slice=%s",
             backfill_result,
             cross_ref_result,
             len(rebuild_result),
             cal_result,
+            slice_cal_result,
         )
-        return {"backfill": backfill_result, "cross_reference": cross_ref_result, "rebuilt": len(rebuild_result), "calibration": cal_result}
+        return {
+            "backfill": backfill_result,
+            "cross_reference": cross_ref_result,
+            "rebuilt": len(rebuild_result),
+            "calibration": cal_result,
+            "slice_calibration": slice_cal_result,
+        }
     except Exception as e:
         logger.error("Learning refresh error: %s", e)
         return {"error": str(e)}

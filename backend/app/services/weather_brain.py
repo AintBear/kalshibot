@@ -487,7 +487,7 @@ def get_brain_status() -> dict:
             if lesson not in lessons:
                 lessons.append(lesson)
 
-    score = _compute_brain_score(
+    score_breakdown = _compute_brain_score_breakdown(
         settled=learning_samples,
         avg_clv=avg_clv,
         recent_clv=recent_clv,
@@ -501,6 +501,7 @@ def get_brain_status() -> dict:
         recent_prediction_accuracy=recent_prediction_accuracy,
         recent_positive_clv_rate=recent_positive_clv_rate,
     )
+    score = score_breakdown["score"]
 
     from app import config as cfg
     settings = cfg.load()
@@ -510,6 +511,7 @@ def get_brain_status() -> dict:
         "readiness_label": _readiness_label(score, learning_samples, entry_quality_ok, avg_clv),
         "learning_active": learning_active,
         "score": score,
+        "score_breakdown": score_breakdown,
         "paper_trading": settings.get("paper_trading", True),
         "automation_enabled": settings.get("automation_enabled", False),
         "auto_paper_trade_enabled": settings.get("auto_paper_trade_enabled", False),
@@ -588,24 +590,52 @@ def _compute_brain_score(
     recent_prediction_accuracy: float = 0.0,
     recent_positive_clv_rate: float = 0.0,
 ) -> int:
-    """Continuous brain score weighted toward recent performance.
-    Old bad trades fade out so the score reflects the bot's current ability,
-    not its historical mistakes."""
+    return _compute_brain_score_breakdown(
+        settled=settled,
+        avg_clv=avg_clv,
+        recent_clv=recent_clv,
+        positive_clv_rate=positive_clv_rate,
+        realized_pnl=realized_pnl,
+        recent_pnl=recent_pnl,
+        entry_quality_ok=entry_quality_ok,
+        auto_eligible_count=auto_eligible_count,
+        prediction_accuracy=prediction_accuracy,
+        prediction_sample_count=prediction_sample_count,
+        recent_prediction_accuracy=recent_prediction_accuracy,
+        recent_positive_clv_rate=recent_positive_clv_rate,
+    )["score"]
 
+
+def _compute_brain_score_breakdown(
+    settled: int,
+    avg_clv: float,
+    recent_clv: float,
+    positive_clv_rate: float,
+    realized_pnl: float,
+    recent_pnl: float,
+    entry_quality_ok: bool,
+    auto_eligible_count: int,
+    prediction_accuracy: float = 0.0,
+    prediction_sample_count: int = 0,
+    recent_prediction_accuracy: float = 0.0,
+    recent_positive_clv_rate: float = 0.0,
+) -> dict:
+    """Per-component subscores so the UI can answer 'what's keeping the score below 90?'.
+
+    Components and their independent maxes (sum to 100):
+      samples 10 | clv 15 | recent_clv 10 | positive_rate 15 |
+      recent_pnl 10 | segments 10 | prediction 30
+    """
     sample_score = min(10.0, settled * 0.20)
 
-    # CLV: 70% recent, 30% overall so improvements show fast
     blended_clv = recent_clv * 0.7 + avg_clv * 0.3
     clv_score = max(0.0, min(15.0, (blended_clv + 5.0) * 1.5))
 
-    # Recent CLV trend (0-10): pure recent signal
     recent_clv_score = max(0.0, min(10.0, (recent_clv + 2.0) * 2.5))
 
-    # Positive CLV rate: blend recent and overall
     blended_rate = recent_positive_clv_rate * 0.7 + positive_clv_rate * 0.3
     rate_score = max(0.0, min(15.0, (blended_rate - 0.15) * 33.33))
 
-    # P&L: recent P&L matters more than cumulative
     if recent_pnl >= 0:
         pnl_score = min(10.0, 5.0 + recent_pnl * 1.0)
     else:
@@ -613,15 +643,45 @@ def _compute_brain_score(
 
     segment_score = min(10.0, auto_eligible_count * 3.5)
 
-    # Prediction accuracy: blend recent (last 100) with overall
     if prediction_sample_count >= 10:
         blended_accuracy = recent_prediction_accuracy * 0.7 + prediction_accuracy * 0.3
         pred_score = max(0.0, min(30.0, (blended_accuracy - 0.25) * 85.71))
+        pred_detail = f"blended accuracy {blended_accuracy*100:.1f}% (max at 60%)"
     else:
         pred_score = 0.0
+        pred_detail = f"<10 prediction samples ({prediction_sample_count})"
 
-    score = sample_score + clv_score + recent_clv_score + rate_score + pnl_score + segment_score + pred_score
-    return int(round(max(0, min(100, score))))
+    components = [
+        {"name": "samples", "value": round(sample_score, 2), "max": 10.0,
+         "detail": f"{settled} settled (max at 50)"},
+        {"name": "clv", "value": round(clv_score, 2), "max": 15.0,
+         "detail": f"blended CLV {blended_clv:+.2f}c (max at +5c)"},
+        {"name": "recent_clv", "value": round(recent_clv_score, 2), "max": 10.0,
+         "detail": f"recent CLV {recent_clv:+.2f}c (max at +2c)"},
+        {"name": "positive_rate", "value": round(rate_score, 2), "max": 15.0,
+         "detail": f"blended positive rate {blended_rate*100:.1f}% (max at 60%)"},
+        {"name": "recent_pnl", "value": round(pnl_score, 2), "max": 10.0,
+         "detail": f"recent P&L ${recent_pnl:+.2f} (max at +$5)"},
+        {"name": "segments", "value": round(segment_score, 2), "max": 10.0,
+         "detail": f"{auto_eligible_count} auto-eligible segments (max at 3)"},
+        {"name": "prediction", "value": round(pred_score, 2), "max": 30.0,
+         "detail": pred_detail},
+    ]
+    for c in components:
+        c["headroom"] = round(c["max"] - c["value"], 2)
+
+    raw = sum(c["value"] for c in components)
+    score = int(round(max(0, min(100, raw))))
+
+    # Largest single source of upside — directly tells the user where to focus.
+    biggest = max(components, key=lambda c: c["headroom"])
+
+    return {
+        "score": score,
+        "raw_total": round(raw, 2),
+        "components": components,
+        "biggest_gap": {"component": biggest["name"], "headroom": biggest["headroom"], "detail": biggest["detail"]},
+    }
 
 
 def _readiness_label(score: int, settled: int, entry_quality_ok: bool, avg_clv: float = 0.0) -> str:

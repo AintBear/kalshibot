@@ -658,6 +658,7 @@ def _process_market(
             "spread": quote.get("spread"),
             "liquidity": quote.get("liquidity"),
             "volume_24h": quote.get("volume_24h"),
+            "open_interest": market.get("open_interest"),
         },
     )
 
@@ -673,6 +674,7 @@ def _process_market(
         "spread": quote.get("spread"),
         "liquidity": quote.get("liquidity"),
         "volume_24h": quote.get("volume_24h"),
+        "open_interest": market.get("open_interest"),
         "event_ticker": event_ticker,
         "event_has_open_trade": event_has_open_trade,
         "kalshi_url": f"https://kalshi.com/markets/{series_ticker}/{event_ticker}",

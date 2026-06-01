@@ -1,10 +1,10 @@
 # KalshiBot - Project Instructions
 
-## Bot Status (updated 2026-06-01, session 15 — verified from live API + DB)
+## Bot Status (updated 2026-06-01, session 16 — verified from live API + DB)
 
-**Overall realized P&L: -$75.92** on 655 real `market_closed` settlements | **Strategy zone P&L: +$23.51** on 310 NO 20-40c bracket trades (blocked cities + explore excluded) | **30 open paper trades** | **Brain score: 82** (still below 90 live gate) | **Recent-30 expectancy: -$0.54 / -0.57c CLV (entry_quality_ok=false)**
+**Overall realized P&L: -$75.92** on 655 real `market_closed` settlements | **Strategy zone P&L: +$23.51** on 310 NO 20-40c bracket trades | **30 open paper trades** | **Brain score: 82** | **Biggest score gap: `clv +6.48` (blended CLV +0.68c, max at +5c)** | **138 tests pass**
 
-**Session 15 just shipped two CLV-recovery changes:** (1) paper fills now use midpoint instead of ask — should claw back 1–5¢ per fill on any spread > 1¢. (2) intraday temperature observations now feed the model — bot no longer bets against HIGH brackets the city already exceeded by mid-afternoon. Forward-validation pending; need 30+ new settlements under these rules to confirm CLV turns positive.
+**Sessions 15 + 16 shipped six engineering changes targeting the recent-30 CLV gate.** Every item from the original 6-point improvement list is in: limit-order fills (paper midpoint default), intraday temperature observations, slice-aware calibration (with session-4-disaster safeguards), ECMWF as third weather source, liquidity floor on volume, and a brain score breakdown so the gap to 90 is visible. Nothing is queued. **Forward validation is the only remaining work.**
 
 ### What's actually true
 
@@ -48,6 +48,51 @@ Each session, do exactly two things from this priority list (top = highest impac
 5. **Infrastructure** — Tests, monitoring, deployment reliability.
 
 After each session, update the status table above and note what changed.
+
+## What Was Done (2026-06-01, session 16 — Claude/Opus)
+
+The user wanted the remaining four queued items built rather than left as TODOs. All four shipped:
+
+### Liquidity floor (#5)
+- New settings `min_volume_24h` (default $25) and `min_open_interest` (default 0, off until OI history is more complete) in `backend/app/config.py` + `config/settings.example.json`.
+- `backend/app/services/scanner.py` now plumbs `open_interest` through to the alert details so the blocker can see it.
+- `backend/app/services/position_sizing.py` adds two new blockers: `thin market (X 24h vol < $Y floor)` and `low open interest (X < Y floor)`. Skips trades that survive every other filter but settle into wide-spread, hard-to-fill markets.
+
+### ECMWF as third weather source (#4)
+- New `_fetch_ecmwf_forecast()` + `_extract_ecmwf_forecast()` in `weather_model.py`. Hits Open-Meteo with `models=ecmwf_ifs025` — independent European model, completely different physics from NWS/GFS.
+- `_merge_forecasts()` takes a 4th source and weights NWS 0.60, AccuWeather 0.40, Open-Meteo 0.40, ECMWF 0.40 (NWS preserved as official settlement source). Source disagreement signal now reflects three-way disagreement when present.
+- New setting `ecmwf_enabled` (default true). Verified live: scoring Austin HIGH B92.5 returns `forecast_sources: ['NWS', 'AccuWeather', 'Open-Meteo', 'ECMWF']`.
+- Cached 30 min per (lat, lon), matching Open-Meteo's existing cache.
+
+### Brain score 82-vs-90 audit (#9)
+- **Diagnosis**: gap is real, no scoring quirk. 4 of 7 components are already maxed (samples, positive_rate, segments, prediction). The 18 missing points sit entirely in the three CLV/P&L components, and 90% of that gap is recent-window — exactly the metrics #1 (limit fills) and #2 (intraday obs) target.
+- **Code**: `_compute_brain_score_breakdown()` now returns per-component `value/max/headroom/detail` + `biggest_gap`. Exposed on `/api/brain/status` as `score_breakdown`. Live API verified: `BIGGEST GAP: clv +6.48 (blended CLV +0.68c, max at +5c)`.
+- Original `_compute_brain_score()` is now a thin wrapper so nothing downstream breaks.
+
+### Slice-aware calibration (#3, the risky one)
+- **Re-enabled `_apply_calibration()`** with three hard safeguards that prevent the session-4 disaster (LV +0.62 bias from 5 samples):
+  1. **Min 20 samples** per (city, market_type) slice before any application.
+  2. **Bias clamped at ±0.15** — even with thousands of samples, a single slice cannot shift model_prob by more than 15 percentage points.
+  3. **Sample-count ramp** from 50% weight at 20 samples to 100% at 50 samples.
+- **Fixed the circular-calibration trap** in `update_model_calibration()`: now uses `raw_model_prob` from alert details (not post-cal `model_prob`), explicitly excludes explore-mode trades, persists biases for slices below the apply threshold so the UI can show progress.
+- Wired into the scheduler — runs at startup and every learning refresh.
+- In-process cache (10 min TTL) keyed by (city, market_type) so per-alert lookup stays cheap.
+- Live verification: 10 slices in `model_calibration` table, biases ranging +0.03 (MIN) to +0.50 (LV). All currently below the 20-sample threshold so nothing applies yet — exactly the conservative-by-default behavior we want. As trades settle, slices will cross the floor and start contributing.
+
+### Tests
+- 21 new tests across `test_slice_calibration_and_brain_breakdown.py` (8) and earlier-session test files. **138/138 pass.**
+- The brain breakdown test pins the live-runtime score (82) to lock against any regression that breaks the formula.
+- The calibration safeguard tests pin the +0.62 LV case: would have shifted model_prob by +0.62 in old code, now clamps to applied_bias of +0.15.
+
+### End-to-end runtime verification
+- `/health` → ok, no issues
+- `/api/brain/status` → score 82, breakdown shows `clv` is the biggest gap at +6.48
+- `/api/scan/status` → 535/535, 0 errors, 30 paper trades created
+- Score one live Austin alert: `forecast_sources: NWS+AccuWeather+Open-Meteo+ECMWF`, intraday observation `observed_high=89.2 at hour 14`, calibration `applied=False, samples=19, min_samples=20` (one sample below threshold — calibration starts firing next week as settlements accumulate)
+
+### What this leaves
+
+Nothing queued. Every item from the original 6-point list (limit fills, intraday temps, slice calibration, ECMWF, liquidity floor, brain audit) is shipped. The remaining work is **forward validation** — wait 30–50 settlements under these rules and see if recent-30 CLV crosses zero. The brain breakdown will tell you in real time exactly how close you are.
 
 ## What Was Done (2026-06-01, session 15 — Claude/Opus)
 

@@ -113,6 +113,27 @@ def recommend_alert(alert: dict, settings: dict, explore: bool = False) -> dict:
     except (TypeError, ValueError):
         pass
 
+    # Liquidity floor — thin markets have wide spreads, bad fills, and
+    # outsized slippage when our 1-3 contract order moves the price. The
+    # bot historically traded markets with $20 in 24h volume.
+    min_volume = float(settings.get("min_volume_24h") or 0.0)
+    if min_volume > 0:
+        vol = details.get("volume_24h")
+        try:
+            if vol is not None and float(vol) < min_volume:
+                blockers.append(f"thin market ({float(vol):.0f} 24h vol < ${min_volume:.0f} floor)")
+        except (TypeError, ValueError):
+            pass
+
+    min_oi = float(settings.get("min_open_interest") or 0.0)
+    if min_oi > 0:
+        oi = details.get("open_interest")
+        try:
+            if oi is not None and float(oi) < min_oi:
+                blockers.append(f"low open interest ({float(oi):.0f} < {min_oi:.0f} floor)")
+        except (TypeError, ValueError):
+            pass
+
     ticker_upper = (alert.get("market_ticker") or details.get("ticker") or "").upper()
     is_low_market = "LOW" in ticker_upper
     unlimited_paper = bool(settings.get("paper_unlimited_learning", False))

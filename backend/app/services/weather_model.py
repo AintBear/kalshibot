@@ -21,6 +21,7 @@ NOAA_CDO_DATASETS_URL = "https://www.ncdc.noaa.gov/cdo-web/api/v2/datasets"
 _FORECAST_CACHE: dict[tuple[float, float], Optional[dict]] = {}
 _CURRENT_CACHE: dict[str, dict] = {}
 _OPEN_METEO_CACHE: dict[tuple[float, float], dict] = {}
+_ECMWF_CACHE: dict[tuple[float, float], dict] = {}
 _ACCU_LOCATION_CACHE: dict[tuple[float, float], dict] = {}
 _ACCU_FORECAST_CACHE: dict[str, dict] = {}
 _ACCU_CURRENT_CACHE: dict[str, dict] = {}
@@ -586,10 +587,67 @@ def _extract_open_meteo_forecast(forecast_data: dict, target_date: str) -> dict:
     return result
 
 
-def _merge_forecasts(nws: dict, accuweather: Optional[dict], open_meteo: Optional[dict] = None) -> dict:
+def _fetch_ecmwf_forecast(lat: float, lon: float) -> Optional[dict]:
+    """Fetch the ECMWF IFS forecast via Open-Meteo.
+
+    Open-Meteo's default endpoint returns the "best match" model — for US
+    cities that's GFS-derived, which often agrees with NWS by construction
+    (NWS uses GFS as one of its inputs). ECMWF is built on a completely
+    independent global model, so its forecast carries genuinely new
+    information. When ECMWF disagrees with NWS+GFS, the model should be
+    less confident; when all three agree, more confident.
+    """
+    try:
+        from app import config as _cfg
+        if not bool(_cfg.load().get("ecmwf_enabled", True)):
+            return None
+    except Exception:
+        pass
+
+    cache_key = (round(lat, 4), round(lon, 4))
+    cached = _ECMWF_CACHE.get(cache_key)
+    if cached and cached.get("data") and time.time() - cached.get("_ts", 0) < 1800:
+        return cached.get("data")
+
+    try:
+        response = requests.get(
+            OPEN_METEO_FORECAST_URL,
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+                "temperature_unit": "fahrenheit",
+                "timezone": "auto",
+                "forecast_days": 3,
+                "models": "ecmwf_ifs025",
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        _ECMWF_CACHE[cache_key] = {"data": data, "_ts": time.time()}
+        return data
+    except Exception as exc:
+        logger.warning("ECMWF (open-meteo) fetch failed: %s", exc)
+        _ECMWF_CACHE[cache_key] = {"data": None, "_ts": time.time()}
+        return None
+
+
+def _extract_ecmwf_forecast(forecast_data: dict, target_date: str) -> dict:
+    # ECMWF response shape on open-meteo matches the regular forecast.
+    return _extract_open_meteo_forecast(forecast_data, target_date)
+
+
+def _merge_forecasts(
+    nws: dict,
+    accuweather: Optional[dict],
+    open_meteo: Optional[dict] = None,
+    ecmwf: Optional[dict] = None,
+) -> dict:
     nws = nws or {"high": None, "low": None, "precip_pct": None}
     accuweather = accuweather or {"high": None, "low": None, "precip_pct": None}
     open_meteo = open_meteo or {"high": None, "low": None, "precip_pct": None}
+    ecmwf = ecmwf or {"high": None, "low": None, "precip_pct": None}
     result = {"high": None, "low": None, "precip_pct": None}
     source_disagreement = 0.0
     precip_source_disagreement = 0.0
@@ -605,15 +663,19 @@ def _merge_forecasts(nws: dict, accuweather: Optional[dict], open_meteo: Optiona
     if any(open_meteo.get(k) is not None for k in ("high", "low", "precip_pct")):
         sources.append("Open-Meteo")
         forecast_sources.append("open_meteo")
+    if any(ecmwf.get(k) is not None for k in ("high", "low", "precip_pct")):
+        sources.append("ECMWF")
+        forecast_sources.append("ecmwf")
 
     for key in ("high", "low", "precip_pct"):
         nws_val = _to_float(nws.get(key))
         accu_val = _to_float(accuweather.get(key))
         om_val = _to_float(open_meteo.get(key))
+        ec_val = _to_float(ecmwf.get(key))
         weighted_vals = []
         all_vals = []
         if nws_val is not None:
-            weighted_vals.append((nws_val, 0.60))
+            weighted_vals.append((nws_val, 0.60))  # official settlement source
             all_vals.append(nws_val)
         if accu_val is not None:
             weighted_vals.append((accu_val, 0.40))
@@ -621,6 +683,11 @@ def _merge_forecasts(nws: dict, accuweather: Optional[dict], open_meteo: Optiona
         if om_val is not None:
             weighted_vals.append((om_val, 0.40))
             all_vals.append(om_val)
+        if ec_val is not None:
+            # ECMWF is the most-independent signal we can get (different
+            # global model from NWS/GFS), so it earns real weight.
+            weighted_vals.append((ec_val, 0.40))
+            all_vals.append(ec_val)
         if weighted_vals:
             total_weight = sum(w for _, w in weighted_vals)
             result[key] = round(sum(v * w for v, w in weighted_vals) / total_weight, 1)
@@ -643,6 +710,8 @@ def _merge_forecasts(nws: dict, accuweather: Optional[dict], open_meteo: Optiona
         result["accuweather"] = accuweather
     if "Open-Meteo" in sources:
         result["open_meteo"] = open_meteo
+    if "ECMWF" in sources:
+        result["ecmwf"] = ecmwf
     return result
 
 
@@ -970,9 +1039,11 @@ def score_market(
     forecast_data = None
     accuweather_data = None
     open_meteo_data = None
+    ecmwf_data = None
     forecast_temps = {"high": None, "low": None, "precip_pct": None}
     accuweather_temps = {"high": None, "low": None, "precip_pct": None}
     open_meteo_temps = {"high": None, "low": None, "precip_pct": None}
+    ecmwf_temps = {"high": None, "low": None, "precip_pct": None}
 
     if lat and lon:
         forecast_data = _fetch_nws_forecast(lat, lon)
@@ -984,8 +1055,11 @@ def score_market(
         open_meteo_data = _fetch_open_meteo_forecast(lat, lon)
         if open_meteo_data:
             open_meteo_temps = _extract_open_meteo_forecast(open_meteo_data, target_date)
+        ecmwf_data = _fetch_ecmwf_forecast(lat, lon)
+        if ecmwf_data:
+            ecmwf_temps = _extract_ecmwf_forecast(ecmwf_data, target_date)
 
-    forecast = _merge_forecasts(forecast_temps, accuweather_temps, open_meteo_temps)
+    forecast = _merge_forecasts(forecast_temps, accuweather_temps, open_meteo_temps, ecmwf_temps)
 
     observed = None
     if lat and lon and target_date and segment != "precipitation":
@@ -1341,16 +1415,142 @@ def _estimate_model_prob(
     return None
 
 
+# Slice-aware calibration tuning constants. These are the safeguards that
+# prevent a repeat of the +0.62 LV blowup documented in session 6.
+_CALIBRATION_MIN_SAMPLES = 20            # below this, the slice is too noisy to trust
+_CALIBRATION_FULL_SAMPLES = 50           # at/above this, apply the full measured bias
+_CALIBRATION_MAX_ABS_BIAS = 0.15         # cap any single-slice correction at +/- 0.15
+_CALIBRATION_CACHE: dict[tuple[str, str], dict] = {}
+_CALIBRATION_CACHE_TS = 0.0
+_CALIBRATION_CACHE_TTL = 600             # rebuild the in-memory lookup every 10 min
+
+
+def _load_calibration_slices() -> dict:
+    """In-process cache of the model_calibration table keyed by (city, market_type)."""
+    global _CALIBRATION_CACHE, _CALIBRATION_CACHE_TS
+    now = time.time()
+    if _CALIBRATION_CACHE and (now - _CALIBRATION_CACHE_TS) < _CALIBRATION_CACHE_TTL:
+        return _CALIBRATION_CACHE
+    try:
+        from app.database import get_conn
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT city, market_type, sample_count, calibration_bias, "
+            "avg_model_prob, avg_settlement_rate FROM model_calibration"
+        ).fetchall()
+        conn.close()
+    except Exception as exc:
+        logger.warning("calibration cache load failed: %s", exc)
+        return _CALIBRATION_CACHE  # serve stale rather than fall to identity
+    fresh: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        try:
+            city = str(row["city"]).upper() if row["city"] else None
+            market_type = str(row["market_type"]).lower() if row["market_type"] else None
+            if not city or not market_type:
+                continue
+            fresh[(city, market_type)] = {
+                "sample_count": int(row["sample_count"] or 0),
+                "calibration_bias": float(row["calibration_bias"] or 0.0),
+                "avg_model_prob": float(row["avg_model_prob"] or 0.0),
+                "avg_settlement_rate": float(row["avg_settlement_rate"] or 0.0),
+            }
+        except Exception:
+            continue
+    _CALIBRATION_CACHE = fresh
+    _CALIBRATION_CACHE_TS = now
+    return _CALIBRATION_CACHE
+
+
+def invalidate_calibration_cache() -> None:
+    """Test hook + called by the rebuild routine after the table is rewritten."""
+    global _CALIBRATION_CACHE_TS
+    _CALIBRATION_CACHE_TS = 0.0
+
+
 def _apply_calibration(model_prob: float, ticker: str, segment: str) -> Tuple[float, dict]:
-    # DISABLED: City-level calibration biases are computed from 5-8 samples and
-    # are massively noisy (+0.62 for LV). They flip 59 tradeable NO alerts to YES
-    # (which is blocked at 0% accuracy), causing the bot to miss opportunities.
-    # Re-enable once we have 50+ samples per city/segment with raw_model_prob.
-    return model_prob, {"applied": False, "reason": "disabled_noisy_biases"}
+    """Apply per-(city, segment) calibration with sample-count safeguards.
+
+    Was disabled in session 4 because the original implementation pulled
+    biases from 5-8 sample slices (+0.62 for LV) that flipped tradeable NO
+    alerts to blocked YES alerts. Re-enabling with three safeguards:
+
+    1. Min 20 samples per slice before any application — below this, the
+       slice is treated as noise and the raw forecast probability passes
+       through.
+    2. Bias magnitude capped at +/- 0.15 — even with 1000 samples, a single
+       slice cannot move the probability by more than 15 percentage points.
+    3. Sample-count ramp from 20 (50% weight) to 50 (100% weight) — gradual
+       application as evidence accumulates rather than a hard cliff.
+
+    Critically, the rebuild routine uses ``raw_model_prob`` (the pre-cal
+    output) rather than the post-cal ``model_prob`` field, so the loop is
+    not circular.
+    """
+    try:
+        city = (_city_code_from_ticker(ticker) or "").upper()
+    except Exception:
+        city = ""
+    market_type = (segment or "").lower()
+    if not city or not market_type:
+        return model_prob, {"applied": False, "reason": "missing_slice_key"}
+
+    slices = _load_calibration_slices()
+    slice_data = slices.get((city, market_type))
+    if not slice_data:
+        return model_prob, {"applied": False, "reason": "no_slice_calibration"}
+
+    samples = int(slice_data.get("sample_count") or 0)
+    if samples < _CALIBRATION_MIN_SAMPLES:
+        return model_prob, {
+            "applied": False,
+            "reason": "insufficient_samples",
+            "samples": samples,
+            "min_samples": _CALIBRATION_MIN_SAMPLES,
+        }
+
+    raw_bias = float(slice_data.get("calibration_bias") or 0.0)
+    # Hard cap on bias magnitude.
+    bias = max(-_CALIBRATION_MAX_ABS_BIAS, min(_CALIBRATION_MAX_ABS_BIAS, raw_bias))
+    # Ramp weight from 0.5 at min samples to 1.0 at full samples and above.
+    if samples >= _CALIBRATION_FULL_SAMPLES:
+        weight = 1.0
+    else:
+        weight = 0.5 + 0.5 * (
+            (samples - _CALIBRATION_MIN_SAMPLES)
+            / max(1, _CALIBRATION_FULL_SAMPLES - _CALIBRATION_MIN_SAMPLES)
+        )
+    applied_bias = round(bias * weight, 4)
+    adjusted = max(0.0, min(1.0, model_prob + applied_bias))
+    return round(adjusted, 4), {
+        "applied": True,
+        "city": city,
+        "market_type": market_type,
+        "samples": samples,
+        "raw_bias": round(raw_bias, 4),
+        "capped_bias": round(bias, 4),
+        "weight": round(weight, 4),
+        "applied_bias": applied_bias,
+    }
 
 
 def update_model_calibration() -> dict:
-    """Recompute city x market-type probability bias from settled paper outcomes."""
+    """Recompute per-(city, market_type) probability bias from real settlements.
+
+    CRITICAL: uses ``raw_model_prob`` from the alert details — NOT the
+    post-calibration ``model_prob`` — to avoid the circular calibration
+    bug that session 4 caught (calibration trained on calibrated outputs
+    will drift toward fixed-point garbage).
+
+    Excludes paper_reset/bulk_cleanup garbage and the explore-mode
+    diagnostic trades (which are deliberately held out from strategy
+    learning per session 11).
+
+    The application path (`_apply_calibration`) clamps the bias to
+    +/- 0.15 and ramps weight by sample count, so even a single noisy
+    slice with 20 samples and a real +0.30 bias only moves the model
+    probability by ~0.075.
+    """
     try:
         from app.database import get_conn
         conn = get_conn()
@@ -1366,43 +1566,47 @@ def update_model_calibration() -> dict:
                   AND t.clv IS NOT NULL
                   AND t.exit_price IS NOT NULL
                   AND t.exit_price IN (0.0, 1.0)
+                  AND COALESCE(json_extract(a.details, '$.learning_mode'), '') != 'explore'
 """
         ).fetchall()
     except Exception as exc:
         logger.warning("Model calibration read failed: %s", exc)
         return {"updated": 0, "error": str(exc)}
 
-    groups = {}
+    groups: dict[tuple[str, str], list[tuple[float, float]]] = {}
+    skipped_no_raw = 0
     for row in rows:
         try:
             details = json.loads(row["alert_details"] or "{}")
         except Exception:
             details = {}
         ticker = row["market_ticker"]
-        city = details.get("city_code") or _city_code_from_ticker(ticker)
-        market_type = details.get("segment") or _segment_from_ticker(ticker)
-        model_prob = _to_float(row["alert_model_prob"])
-        if model_prob is None:
-            model_prob = _to_float(details.get("raw_model_prob"))
-        if model_prob is None:
-            model_prob = _to_float(details.get("model_prob"))
+        city = (details.get("city_code") or _city_code_from_ticker(ticker) or "").upper() or None
+        market_type = (details.get("segment") or _segment_from_ticker(ticker) or "").lower() or None
+
+        # IMPORTANT: only use raw_model_prob. Falling back to the post-cal
+        # model_prob would create the same circular-calibration trap that
+        # session 4 caught (calibration trains on its own output).
+        raw_prob = _to_float(details.get("raw_model_prob"))
+        if raw_prob is None:
+            skipped_no_raw += 1
+            continue
         exit_price = _to_float(row["exit_price"])
-        if not city or not market_type or model_prob is None or exit_price not in (0.0, 1.0):
+        if not city or not market_type or exit_price not in (0.0, 1.0):
             continue
         actual = 1.0 if exit_price >= 0.5 else 0.0
-        groups.setdefault((city, market_type), []).append((model_prob, actual))
+        groups.setdefault((city, market_type), []).append((raw_prob, actual))
 
     updated = 0
-    skipped = 0
+    insufficient = 0
     conn.execute("DELETE FROM model_calibration")
     for (city, market_type), samples in groups.items():
         sample_count = len(samples)
-        if sample_count < 5:
-            skipped += 1
-            continue
-        avg_model_prob = round(sum(model for model, _actual in samples) / sample_count, 4)
+        # Persist counts even below the apply-threshold so the UI can show
+        # progress toward the 20-sample bar; _apply_calibration enforces.
+        avg_raw_prob = round(sum(model for model, _actual in samples) / sample_count, 4)
         avg_settlement_rate = round(sum(actual for _model, actual in samples) / sample_count, 4)
-        bias = round(avg_settlement_rate - avg_model_prob, 4)
+        bias = round(avg_settlement_rate - avg_raw_prob, 4)
         conn.execute(
             """INSERT INTO model_calibration
                    (city, market_type, sample_count, calibration_bias,
@@ -1414,13 +1618,24 @@ def update_model_calibration() -> dict:
                    avg_model_prob=excluded.avg_model_prob,
                    avg_settlement_rate=excluded.avg_settlement_rate,
                    last_updated=excluded.last_updated""",
-            (city, market_type, sample_count, bias, avg_model_prob, avg_settlement_rate),
+            (city, market_type, sample_count, bias, avg_raw_prob, avg_settlement_rate),
         )
         updated += 1
+        if sample_count < _CALIBRATION_MIN_SAMPLES:
+            insufficient += 1
 
     conn.commit()
     conn.close()
-    return {"updated": updated, "skipped_segments": skipped, "segments_seen": len(groups)}
+    invalidate_calibration_cache()
+    return {
+        "updated": updated,
+        "insufficient_samples": insufficient,
+        "segments_seen": len(groups),
+        "skipped_no_raw_prob": skipped_no_raw,
+        "min_samples_threshold": _CALIBRATION_MIN_SAMPLES,
+        "full_samples_threshold": _CALIBRATION_FULL_SAMPLES,
+        "max_abs_bias": _CALIBRATION_MAX_ABS_BIAS,
+    }
 
 
 def _temp_market_prob(

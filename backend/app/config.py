@@ -33,6 +33,16 @@ _defaults = {
     # been exceeded, model prob -> near certainty).
     "intraday_temps_enabled": True,
     "intraday_temps_cache_seconds": 600,
+    # Liquidity floors. Thin Kalshi weather markets ($20-50 24h volume) have
+    # wide spreads, bad fills, and outsized slippage when even 1-3 contracts
+    # move the price. min_volume_24h is conservative; raise if recent CLV is
+    # still negative on the strategy slice.
+    "min_volume_24h": 25.0,
+    "min_open_interest": 0.0,
+    # ECMWF (European weather model) via Open-Meteo — independent of NWS/GFS,
+    # so its agreement/disagreement is a real confidence signal. Set false to
+    # save one HTTP call per scan if the third source is causing rate issues.
+    "ecmwf_enabled": True,
     "automation_enabled": False,
     "auto_trade_enabled": False,
     "max_contracts_per_trade": 5,
