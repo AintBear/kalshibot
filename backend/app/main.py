@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,9 +22,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Sibylla Weather Bot", version="1.0.0", lifespan=lifespan)
 
+# CORS: localhost dev origins are always allowed. The Fly.io production URL is
+# included so the local React dev server can point VITE_API_URL at it without a
+# CORS preflight failure. Extra origins (e.g. a Cloudflare Pages frontend) can
+# be added via the CORS_ORIGINS env var as a comma-separated list.
+_default_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://sibylla-kalshibot.fly.dev",
+]
+_extra_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
+_allow_origins = _default_origins + _extra_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=_allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
