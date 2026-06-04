@@ -15,12 +15,12 @@ echo "Deploying $APP..."
 fly deploy --app "$APP"
 
 echo
-echo "Verifying health..."
+echo "Waiting for health to come up (machine may be cold-starting)..."
 healthy=0
-for i in 1 2 3 4 5 6 7 8 9 10; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
   status="$(curl -fsS --max-time 8 "https://${APP}.fly.dev/health" 2>&1 || true)"
   if [[ "$status" == *'"status":"ok"'* ]]; then
-    echo "  health: OK"
+    echo "  health: OK (attempt $i)"
     healthy=1
     break
   fi
@@ -29,10 +29,21 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
 done
 if [[ "$healthy" != "1" ]]; then
   echo "ERROR: health never returned ok after deploy" >&2
+  echo "Hint: 'fly logs --app $APP' for backend logs" >&2
   exit 1
 fi
 
 echo
-echo "Quick endpoint sweep:"
-echo "  /api/auto-trade/status: $(curl -fsS --max-time 5 "https://${APP}.fly.dev/api/auto-trade/status" | python3 -c "import json,sys; d=json.load(sys.stdin); print('paper_ready=', d.get('paper_ready'), 'live_ready=', d.get('live_ready'), 'brain=', d.get('brain_score'))")"
-echo "  /api/brain/status.score_breakdown.biggest_gap: $(curl -fsS --max-time 5 "https://${APP}.fly.dev/api/brain/status" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('score_breakdown',{}).get('biggest_gap'))")"
+echo "Running full smoke test..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! "$SCRIPT_DIR/fly-smoke.sh" "$APP"; then
+  echo "ERROR: smoke test failed after deploy. Bot is up but not operating cleanly." >&2
+  exit 1
+fi
+
+echo
+echo "Deploy complete."
+echo "  App:        https://${APP}.fly.dev"
+echo "  Health:     https://${APP}.fly.dev/health"
+echo "  Logs:       fly logs --app $APP"
+echo "  SSH:        fly ssh console --app $APP"
