@@ -81,9 +81,21 @@ Full evidence with queries and sample sizes in **`docs/STRATEGY_RECOMMENDATIONS.
 
 - Capped-pilot caps (§6 of the doc): universe = zone ∩ ≤12h only, max 2 contracts/trade, $25 total exposure, $5/$15 daily/weekly loss limits with auto-revert to paper, go-live only after ≥30 fresh gated paper settlements with positive expectancy and positive true CLV. Need live Kalshi balance to express as bankroll fractions.
 
-### Next (workstreams 2-7 of the mission)
+### Workstreams 2-7: ALL SHIPPED (same session, continued 2026-06-10 morning)
 
-Live order execution layer (limit orders, cancel/re-post, fill reconciliation, SL/TP in lifecycle), Kalshi WebSocket real-time feed + price-path/CLV capture, risk & security layer (kill-switch, caps, idempotency, audit log), sentient UI (SSE push, brain narration), Windows Task Scheduler watchdog.
+- **WS3 — Real-time Kalshi WebSocket feed** (`app/services/realtime.py`): authed `ticker`-channel client (RSA-PSS handshake; external-api host 404s the WS upgrade, elections host serves it — host fallback handles both). Watchlist = open trades + pending alerts. Live marks mirrored into `markets` so every endpoint sees sub-second prices. New `price_snapshots` table (30s throttle, 10s inside 30min of close, immediate on ≥2c moves; 14-day retention). **True CLV**: `trades.close_mark_yes` + `trades.true_clv` filled at settlement from the last pre-close snapshot — never fabricated. Overnight validation: 8 settled trades now carry real true-CLV values. `/api/realtime/status` + `/api/realtime/quotes`.
+- **WS2 — Desk-grade execution** (`order_manager.py`): work-the-bid engine (re-post at bid+1c when outbid, chase capped at +3c, cross inside 45min of close, abandon when budgets exhaust — pure `requote_decision()` unit-tested), real live exits (actual Kalshi sell orders: stop-loss crosses, take-profit rests; trade closes only on confirmed fill at the real price — the old `_live_close` never sold on Kalshi), deterministic idempotent `client_order_id`, reconciliation vs `/portfolio/positions` every ~15min (mismatches audited, never auto-mutated). Order monitor cadence 10m → 1m.
+- **WS4 — Risk & security** (`app/services/risk.py` + `/api/risk/*`): hard kill-switch (blocks ALL new entries paper+live, cancels working live entries, leaves exits alive, fails closed), daily/weekly live loss limits checked every minute (breach → revert to paper + kill switch + audit), pre-trade gauntlet on every live submit (price sanity, contract cap, exposure cap, duplicate guard, balance check), append-only `audit_log`. Defaults = §6 pilot caps, inert until live.
+- **WS5 — Weather pipeline verified fresh**: NWS + Open-Meteo + ECMWF merged with source-disagreement signal; intraday temps current. AccuWeather absent from `forecast_sources` despite live cache — known CODEX item 6 drift, non-blocking.
+- **WS7 — Windows watchdog**: `scripts/watchdog.ps1` (full port of watchdog.sh incl. scan-decision matrix + restart cooldown markers; also starts Docker Desktop itself — which healed a real dead-Docker morning during this session) + `scripts/install-watchdog-windows.ps1` (schtasks, every 5 min). Task `KalshibotWatchdog` registered and verified with a real run.
+- **WS6 — Sentient UI**: `GET /api/stream` (SSE) pushes live quotes, a 5s positions-P&L pulse (marked at live exit quotes), and brain narration (audit actions, scan completions, alert verdicts with blockers/drivers, trade entries). Frontend: shared EventSource (`utils/stream.js`), sidebar live P&L + one-click KILL SWITCH (arm/confirm), Brain page "Live Thoughts" feed, Dashboard "Live Marks" strip. Frontend builds clean.
+- **203/203 backend tests pass.** All commits on branch `fable/session19-entry-window-gate`.
+
+### What remains before live
+
+1. Owner confirms §6 pilot caps + provides live Kalshi balance (loss limits as bankroll fractions).
+2. ≥30 fresh paper settlements under the 12h entry-window gate with positive expectancy AND positive true CLV (now measurable — capture is live).
+3. Owner types GO LIVE → flip `paper_trading=false` + `auto_trade_enabled=true` on ONE machine only (single-writer rule: stop the Mac first if Windows becomes the runner).
 
 ## What Was Done (2026-06-01, session 17 — Claude/Opus)
 
