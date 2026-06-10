@@ -91,6 +91,14 @@ Full evidence with queries and sample sizes in **`docs/STRATEGY_RECOMMENDATIONS.
 - **WS6 — Sentient UI**: `GET /api/stream` (SSE) pushes live quotes, a 5s positions-P&L pulse (marked at live exit quotes), and brain narration (audit actions, scan completions, alert verdicts with blockers/drivers, trade entries). Frontend: shared EventSource (`utils/stream.js`), sidebar live P&L + one-click KILL SWITCH (arm/confirm), Brain page "Live Thoughts" feed, Dashboard "Live Marks" strip. Frontend builds clean.
 - **203/203 backend tests pass.** All commits on branch `fable/session19-entry-window-gate`.
 
+### Owner session 2026-06-10 (midday): training firehose ON + brain gate crossed
+
+- **Owner directive**: no limits on trade COUNT (paper) — maximize training sample; only bad trades stay blocked. Iron-law blockers remain active in every mode (YES-all, NO sub-20c, NO 85c+).
+- **Explore mode re-enabled** (its condition was met: the 30 held-out explore trades settled +$2.03): `paper_learning_explore_max_per_scan` 3→15, `paper_learning_explore_max_open` 30→150. First cycle entered the full 15-trade quota from 348 candidates. Explore stays tagged + held out of strategy learning, so volume cannot pollute the live-gate validation. Strict (strategy) entries still respect the 12h window — that slice is what forward-validates for live.
+- **Brain crossed 90 for the first time: score 94, `entry_quality_ok=true`, blended CLV +2.50c** — the JUN09/10 settlements under the new rules landed positive. Caveat: partly one good settlement day (mirror image of the Mac's 2026-06-03 one-bad-day finding); the ≥30-gated-settlements precondition remains the real bar.
+- **Live Kalshi balance verified from this box: $15.71** (auth works end-to-end). NOTE: this is below the proposed $25 exposure cap — at GO LIVE either deposit more or the pilot is ~10-15 one-contract trades. Owner call.
+- All parallel automations verified running: scheduler (scan 15m / auto-entry 5m / order-monitor 1m / learning refresh), Task Scheduler watchdog (5m, healthy ticks, poked auto-entry safely), realtime WS feed (353 tickers, 5k+ snapshots), SSE stream.
+
 ### What remains before live
 
 1. Owner confirms §6 pilot caps + provides live Kalshi balance (loss limits as bankroll fractions).
