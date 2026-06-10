@@ -1,167 +1,136 @@
 # Codex Handoff — what to pick up next session
 
 This is the running handoff between Codex and Claude. Both agents
-coordinate through GitHub PRs (PR #1 = Codex session 11, PR #2 = Claude
-sessions 14–16, both open against `main`). Review prompts live in PR
-descriptions and as PR comments. **Read PR #2's body and the three
-session comments first** — they list the verification asks for each
-shipped change.
+coordinate through GitHub PRs. Review prompts live in PR descriptions and
+as PR comments. **Read this file + the latest CLAUDE.md session entry
+first.**
 
-## Live state as of session 16
+## Live state as of session 19 (2026-06-04)
 
 - Runtime: **`/Users/AintBear/Projects/kalshibot`** with launchd watchdog
-  (`com.sibylla.kalshibot.watchdog`)
-- Branch: `claude/wonderful-heisenberg-512338` at commit `10e9093`,
-  stacked on `codex/session11-runtime-coordination` (PR #2 → PR #1)
-- Brain score: 82. Biggest gap: `clv +6.48 (blended CLV +0.68c, max at +5c)`
-- Live trading: off and gated. Don't flip.
-- 145/145 backend tests pass on the Codex review branch
+  (`com.sibylla.kalshibot.watchdog`). Backend healthy at
+  `http://localhost:8000`.
+- Brain score: **66** (was 82 at session 17 — see below for why this is
+  not a real regression).
+- Recent_30 avg CLV: **-10.13c**. Recent_30 P&L: **-$8.55**.
+  `entry_quality_ok=false`. Live trading correctly gated off — don't flip.
+- Open paper trades: 21. Overall realized P&L: -$80.33 across 706
+  settlements. Strategy zone (NO 20-40c bracket, blocked cities excluded,
+  non-threshold): +$20.80 on 364 settlements at 73.9% win rate.
+- 146/146 backend tests pass on `main`.
 
-## Codex review update as of 2026-06-01
+## What landed in sessions 18 + 19
 
-Codex reviewed PR #2 and found three operational blockers in the handoff
-items:
+- **PR #5** (session 18, merged in session 19 as `c712ce5`): Fly.io deploy
+  hardening. `fly.toml` grace period 30s → 60s. CORS allowlist +
+  `CORS_ORIGINS` env var. New `scripts/fly-smoke.sh`. `scripts/fly-deploy.sh`
+  now gates on smoke before declaring success.
+- **`.github/workflows/deploy.yml`** (session 19): GitHub Actions
+  auto-deploy. Triggers on `workflow_run` completion of `tests` on `main`.
+  No-ops if `FLY_API_TOKEN` is not set. `workflow_dispatch` available
+  for manual.
+- **CLAUDE.md AccuWeather reconciliation** (session 19): doc no longer
+  claims AccuWeather is "expired". Runtime: live, weight 0.40, one of
+  four active forecast sources.
+- **No trading-logic changes.** No blocker, sigma, calibration safeguard,
+  or scheduler changes.
 
-- `scripts/watchdog.sh` treated any `/health` 503 as an immediate backend
-  restart before reaching the scan-specific decision path. That could restart
-  on stale scans and repeat restarts for the same high-error scan. Fixed with
-  health classification, scan-degraded deferral, and a restart marker/cooldown.
-- The Fly path pointed `fly.toml` at `backend/Dockerfile`, but Fly keeps the
-  Docker build context at the repo root when running `fly deploy` from the
-  repo root. Added `Dockerfile.fly`, pointed `fly.toml` at it, and added
-  `.dockerignore` so local DB/config/key files are not sent to Docker/Fly build
-  context.
-- The scanner's stored recommendation passed only a narrow nested details dict
-  into `position_sizing`, so the new `min_volume_24h`/`min_open_interest`
-  blockers could be missing from serialized scan recommendations even though
-  auto-entry/live-readiness re-ran sizing correctly. Fixed by passing the full
-  alert details dict.
+## The CLV "regression" — what it actually is
 
-Verification from this pass: backend tests 145 passed, frontend build passed,
-local runtime `/health` OK, latest scan 535/535 with 0 series errors, DB
-`quick_check` OK, raw forecast and intraday fields persisted, live remains
-blocked (`paper_trading=true`, `entry_quality_ok=false`), Fly image builds and
-smoke `/health` returns OK on an empty config volume with automation off.
+Recent_30 dropped from session 17's +0.68c to -10.13c. **It is not a
+failure of the session 15-16 engineering work.** Investigation in
+session 19 narrowed it to a single bad weather day:
 
-## Items for Codex (in priority order)
+- 2026-06-03 alone contributed -$10.47 / -0.119 CLV.
+- 31 NO-bracket trades from a single scan, 25/30 sized at 3 contracts,
+  11 lost.
+- The brain's `recent_30` is `LIMIT 30 ORDER BY exit_time DESC`. That one
+  day plus one straggler from 2026-06-02 *is* the window.
+- The bot was still 63% accurate on the window — above break-even. The
+  losses were just clustered and large.
 
-### 1. Verify the session 14–16 changes (PR #2 review prompts)
+Daily CLV across the last 21 days has a median near zero with 2026-06-03
+as the only meaningful outlier.
 
-Each session left explicit review questions in PR comments:
+## Items in priority order
 
-- **Session 14** (commit `5b561c9`): `/health` scan-state hardening + watchdog
-  `scan_high_error_rate` path. Review prompts in PR #2 body.
-- **Session 15** (commit `0f27e5b`): paper midpoint fill model + intraday
-  observation override. Review prompts in PR #2 comment "Session 15 update".
-- **Session 16** (commit `10e9093`): liquidity floor + ECMWF source +
-  brain score breakdown + slice-aware calibration with session-4
-  safeguards. Review prompts in PR #2 comment "Session 16 update".
+### 1. Wait for 2-3 more scan/settlement cycles before changing anything
 
-If anything passes review, close it out by approving the PR. If anything
-fails, push a fix to `codex/session11-runtime-coordination` and post a
-comment on PR #2 with what changed and why.
+The right move right now is patience. The recent_30 window will roll
+off 2026-06-03 as new settlements arrive. If the median day continues to
+sit near zero, `entry_quality_ok` will flip true without any further
+engineering. **Do not ship trading-logic changes until the window has
+rolled past 2026-06-03.**
 
-### 2. Help the user move to Fly.io
+### 2. Per-weather-event sizing cap (highest-leverage next engineering change)
 
-`DEPLOYMENT.md` now has the full Fly.io path. `fly.toml`,
-`scripts/fly-bootstrap-secrets.sh`, and `scripts/fly-deploy.sh` are in
-the repo. What's NOT done:
+When one scan stamps 31 same-direction NO-bracket trades on the same
+weather day and most are sized at max contracts, the bot's P&L on that
+day is essentially "is the weather model right about *this one day*."
+That's avoidable concentration risk.
 
-- Frontend deployment (currently runs locally only)
-- GitHub Actions auto-deploy on `main` push
-- Initial provisioning (requires the user's Fly credentials)
+Concretely: in `backend/app/services/position_sizing.py` or `auto_entry.py`,
+add a per-(weather-event-date, city) sizing cap. E.g. max 1 contract per
+event-day per city after the first 3 trades. Tune by simulating against
+the historical book.
 
-If the user invokes you with Fly credentials available, run through the
-one-time setup in `DEPLOYMENT.md`. The bootstrap script handles secret
-upload safely (SFTP into the persistent volume, never stored as Fly
-secrets so they can be rotated without a redeploy).
+Do not ship until item #1 plays out — first see if patience alone
+restores the window.
 
-### 3. Live limit-order management in `order_manager.py`
+### 3. Fix `fill_model` not landing in `alerts.details`
 
-When the live gate eventually opens (recent CLV positive, brain ≥ 90,
-`entry_quality_ok = true`), live mode still defaults to `live_fill_model
-= "ask"` because the bot doesn't yet post real limit orders. The paper
-side simulates midpoint fills; live needs the order-management layer.
+Session 15 added `fill_model` to the recommendation result but it isn't
+being persisted into `alerts.details` rows. Without this, we **cannot
+forward-validate** the midpoint vs ask fill question from history. The
+hypothesis "midpoint is too optimistic and we're booking phantom edge"
+remains untested.
 
-Concretely:
+Trace the path: `position_sizing.recommend_alert` → wherever the result
+is serialized into `alerts.details` JSON. Add `fill_model`, `side_bid`,
+`side_ask` to the persisted structure. Backfill is impossible —
+forward-only.
 
-- `backend/app/services/order_manager.py` should grow a "post passive
-  limit at bid+1c, cancel and re-post on quote move, cross to ask if the
-  alert is < N minutes from expiry" flow.
-- Track fill rate per (city, segment) so we can validate the paper
-  midpoint assumption against reality.
-- `position_sizing` already exposes `fill_model`, `side_bid`,
-  `side_ask` on every recommendation — order_manager just needs to use
-  them.
+### 4. Investigate why all 38 calibration slices have positive bias
 
-Do NOT build this until the user explicitly asks. Paper-only is the
-correct posture until forward-validation shows positive recent
-expectancy.
+`SELECT * FROM model_calibration ORDER BY ABS(calibration_bias) DESC`
+shows every slice with bias between +0.08 and +0.49 — all in the same
+direction. That means raw model_prob is *consistently* below empirical
+settlement rate across every (city, market_type).
 
-### 4. Forward-validation checkpoint
+If real, this is a sigma question (Gaussian is too wide → too much mass
+in the tails → underestimates probability of staying inside the bracket
+→ slice bias raises model_prob to fix it). Could be cleanly addressed by
+narrowing the base sigma or by making `_adaptive_sigma` slice-aware.
 
-After ~30 fresh settlements under the session 15/16 rules (limit fills,
-intraday obs, ECMWF, liquidity floor, slice calibration with safeguards),
-re-run the analysis:
+If artifact: check whether `raw_model_prob` is being computed pre- or
+post-anchor. If post-anchor, the anchor's pull toward market price is
+already biasing it, and the slice "bias" is reflecting that, not the
+raw model.
 
-- Has recent-30 CLV crossed zero? (`/api/brain/status.recent_30_avg_clv`)
-- Has `entry_quality_ok` flipped to true?
-- Has the `BIGGEST GAP` component in the brain breakdown moved off CLV?
-- Have any (city, market_type) slices in `model_calibration` crossed 20
-  samples and started applying?
+### 5. Live limit-order management in `order_manager.py`
 
-If yes: the engineering changes worked. Brief Claude/the user on the
-gate state and let them decide on live mode.
+When the live gate eventually opens, live mode still defaults to
+`live_fill_model = "ask"` because the bot doesn't post real limit
+orders. Paper simulates midpoint; live needs the order-management layer.
 
-If no: the bottleneck is the model itself, not the plumbing. The next
-move is per-slice model retuning — likely a slice-specific sigma table
-in `weather_model._adaptive_sigma` based on which (city, segment) slices
-the calibration table shows as having the highest variance between
-`avg_model_prob` and `avg_settlement_rate`.
+Sketch:
+- Post passive limit at bid+1c.
+- Cancel + re-post if quotes move.
+- Cross to ask if the alert is < N minutes from expiry.
+- Track fill rate per (city, segment) to validate the paper midpoint
+  assumption.
+- `position_sizing` already exposes `fill_model`, `side_bid`, `side_ask`
+  on every recommendation — `order_manager` just needs to use them.
 
-### 5. Slice calibration sanity check after 20+ samples
+Do NOT build this until the user explicitly asks. Paper-only is correct
+until forward-validation shows positive recent expectancy.
 
-Currently no (city, market_type) slice has crossed the 20-sample apply
-threshold — the calibration loads but doesn't fire. Once the first
-slices cross 20, sanity-check before trusting them:
+### 6. Smoke script gap — assert live_auto is off
 
-```bash
-sqlite3 data/sibylla.db "
-  SELECT city, market_type, sample_count, calibration_bias,
-         avg_model_prob, avg_settlement_rate
-    FROM model_calibration
-   WHERE sample_count >= 20
-   ORDER BY ABS(calibration_bias) DESC
-"
-```
-
-Watch for:
-- Any city showing `|calibration_bias| > 0.20` with low sample count
-  (20-30) — would be clamped to ±0.15 with 50% weight, but worth flagging
-- Repeated YES-side bias on cities the bot has historically blocked
-- Drift over time: re-run the same query weekly and check whether biases
-  are converging or oscillating
-
-### 6. AccuWeather doc/code reconciliation
-
-CLAUDE.md sessions 7 + 13 are inconsistent about AccuWeather's status.
-Runtime: `accuweather_cache.status=live`, the key in `config/settings.json`
-is active, and `_fetch_accuweather_forecast` does get called. Either:
-- Update CLAUDE.md to say "AccuWeather is active and contributing to
-  source averaging at weight 0.40", or
-- If AccuWeather should actually be removed (the user has a strong
-  opinion), drop the fetch code, the cache, and the weight.
-
-Not blocking anything but flagged so it doesn't drift further.
-
-## What Claude should do next session
-
-- Read this file
-- Read the latest CLAUDE.md session entry (currently session 16)
-- Check `/api/brain/status.score_breakdown.biggest_gap` to see whether
-  the engineering changes have moved the needle
-- Don't ship more features until forward-validation tells us if the
-  plumbing fixes worked or not
+`scripts/fly-smoke.sh` doesn't assert `live_auto_enabled == False`. The
+smoke would silently pass if someone accidentally flipped live mode on
+the Fly volume. 5-line addition; not urgent because the gate has other
+checks, but worth doing.
 
 ## How Claude and Codex coordinate
 

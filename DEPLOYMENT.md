@@ -137,6 +137,29 @@ fly volumes destroy sibylla_config --yes
 
 ---
 
+## Auto-deploy from GitHub (optional)
+
+`.github/workflows/deploy.yml` runs after the `tests` workflow succeeds on
+`main` and runs `flyctl deploy` + `scripts/fly-smoke.sh`. It no-ops if
+`FLY_API_TOKEN` is not set, so the repo stays cloneable/forkable.
+
+To enable:
+
+```bash
+fly tokens create deploy -x 999999h        # long-lived deploy token
+gh secret set FLY_API_TOKEN                 # paste the token
+```
+
+Once enabled, every merge to `main` deploys automatically. You can still
+run `scripts/fly-deploy.sh` locally for manual deploys (e.g. testing a
+config-volume change).
+
+To trigger a manual deploy from a tagged commit:
+
+```bash
+gh workflow run deploy.yml
+```
+
 ## What this deployment does NOT include yet
 
 - **Frontend.** The `frontend/` React app is not yet deployed to Fly.
@@ -144,6 +167,3 @@ fly volumes destroy sibylla_config --yes
   URL, or build a static bundle and serve it from the backend (single app,
   one less moving piece). For now you can run the frontend locally and
   point `VITE_API_URL` at `https://sibylla-kalshibot.fly.dev`.
-- **CI auto-deploy.** Adding a GitHub Action that runs `fly deploy` on
-  `main` push is a 10-line `.github/workflows/deploy.yml`; left out so
-  you can decide whether to wire that up or keep deploys manual.

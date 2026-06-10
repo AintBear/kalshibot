@@ -1,12 +1,14 @@
 # KalshiBot - Project Instructions
 
-## Bot Status (updated 2026-06-10, session 19 — Fable/Windows, verified from DB + live API)
+## Bot Status (updated 2026-06-10, session 19-Windows — Fable, verified from DB + live API; merged with session 19-Mac of 2026-06-04)
 
-**Overall realized P&L: -$92.21** on 734 linked strategy settlements | **Strategy zone P&L: +$10.31** on 419 trades, but **forward (May 25+) zone expectancy is -3.2c/contract** | **Brain score: 66** | **Biggest gap: `clv` (blended -5.31c)** | **153 tests pass**
+**Overall realized P&L: -$92.21** on 734 linked strategy settlements | **Strategy zone P&L: +$10.31** on 419 trades, but **forward (May 25+) zone expectancy is -3.2c/contract** | **Brain score: 94 (crossed 90 on 2026-06-10 — must hold through ≥30 gated settlements)** | **203 tests pass**
 
-**Session 19 verdict (full evidence in `docs/STRATEGY_RECOMMENDATIONS.md`):** the market's own price is a better forecaster than the model (Brier 0.205 vs 0.296, holds forward), claimed model edge is anti-predictive (20c+ edge bucket: 48% win, -$30.81), and the 20-40c zone edge decayed to zero forward. The ONE slice with real evidence of edge: **zone entries ≤12h to close — +13.06c/contract, n=48, t=+2.49** (forward +8.73c, n=37; physical mechanism: intraday weather is partly observable near close). A `max_entry_hours_to_close=12` entry-window gate is now shipped (soft in paper, unconditional in live). Capped-pilot caps proposed in the doc §6 — awaiting owner confirmation.
+**Session 19-Windows verdict (full evidence in `docs/STRATEGY_RECOMMENDATIONS.md`):** the market's own price is a better forecaster than the model (Brier 0.205 vs 0.296, holds forward), claimed model edge is anti-predictive (20c+ edge bucket: 48% win, -$30.81), and the 20-40c zone edge decayed to zero forward. The ONE slice with real evidence of edge: **zone entries ≤12h to close — +13.06c/contract, n=48, t=+2.49** (forward +8.73c, n=37; physical mechanism: intraday weather is partly observable near close). A `max_entry_hours_to_close=12` entry-window gate is now shipped (soft in paper, unconditional in live). Session 19-Mac (2026-06-04) independently concluded the recent-CLV crash was one bad day (2026-06-03) and shipped Fly auto-deploy — both entries preserved below.
 
-**Sessions 15 + 16 shipped six engineering changes targeting the recent-30 CLV gate.** Every item from the original 6-point improvement list is in: limit-order fills (paper midpoint default), intraday temperature observations, slice-aware calibration (with session-4-disaster safeguards), ECMWF as third weather source, liquidity floor on volume, and a brain score breakdown so the gap to 90 is visible. Nothing is queued. **Forward validation is the only remaining work.**
+**Forward validation result (session 19 deep dive): the recent_30 regression is variance + one bad day, not a failure of the session 15-16 changes.** 2026-06-03 alone contributed -$10.47 / -0.119 CLV — 31 NO-bracket trades from a single scan, 25/30 sized at 3 contracts, 11 lost. That single day swamps the LIMIT 30 window. The bot was still 63% accurate on those 30 trades (above break-even); the losses were just clustered and large. Daily CLV across the last 21 days has a median near zero with 2026-06-03 as the only meaningful outlier. **Live gate stays closed; no trading logic changes shipped this session.** Wait for 2-3 more scan/settlement cycles before re-evaluating.
+
+**Sessions 18 + 19 shipped deploy infrastructure + a regression investigation**: hardened Fly.io path (PR #5 merged), GitHub Actions auto-deploy on push-to-main, AccuWeather doc reconciliation. No trading-logic changes.
 
 ### What's actually true
 
@@ -34,11 +36,12 @@ Session 13 fixed paper visibility and paper-fill realism. The Paper page now sho
 | Strategy zone P&L           | +$10.31 all-time; -$13.20 Jun-forward | >= $0 forward | FAIL forward |
 | Zone ∩ ≤12h entries (new pilot slice) | +13.06c/ct, n=48, t=+2.49 | >= 30 fresh gated settlements, positive | VALIDATING |
 | Overall realized P&L        | -$92.21 (734 settlements)  | >= $0      | FAIL   |
-| Bot entering new trades     | yes (gated to ≤12h window from session 19) | yes | PASS |
-| Brain trust score           | 66                         | >= 90      | FAIL   |
-| Kalshi credentials          | configured                 | configured | PASS   |
+| Bot entering new trades     | yes (12h gate + explore firehose 15/scan) | yes | PASS |
+| Brain trust score           | 94 (crossed 90 on 2026-06-10) | >= 90   | PASS (must hold) |
+| Kalshi credentials          | configured (live balance $15.71 verified) | configured | PASS |
 | Auto-eligible segments      | 5 (paper)                  | >= 1       | PASS   |
-| Forecast sources            | NWS + Open-Meteo + AccuW + ECMWF | working | PASS  |
+| Forecast sources            | NWS + AccuWeather + Open-Meteo + ECMWF | working | PASS  |
+| Auto-deploy to Fly.io       | wired (FLY_API_TOKEN required) | optional | READY |
 
 ## Daily Improvement System
 
@@ -52,7 +55,7 @@ Each session, do exactly two things from this priority list (top = highest impac
 
 After each session, update the status table above and note what changed.
 
-## What Was Done (2026-06-10, session 19 — Fable/Windows)
+## What Was Done (2026-06-10, session 19-Windows — Fable)
 
 First session on the Windows PC after the USB port. Standing mission accepted: live-capable, hedge-fund-grade trader by June 22 with a capped pilot (owner types GO LIVE first; this box stays dev/paper until the deliberate runner switch).
 
@@ -104,6 +107,78 @@ Full evidence with queries and sample sizes in **`docs/STRATEGY_RECOMMENDATIONS.
 1. Owner confirms §6 pilot caps + provides live Kalshi balance (loss limits as bankroll fractions).
 2. ≥30 fresh paper settlements under the 12h entry-window gate with positive expectancy AND positive true CLV (now measurable — capture is live).
 3. Owner types GO LIVE → flip `paper_trading=false` + `auto_trade_enabled=true` on ONE machine only (single-writer rule: stop the Mac first if Windows becomes the runner).
+
+## What Was Done (2026-06-04, session 19-Mac — Claude/Opus)
+
+User asked for the remaining open work to be driven to completion before they sat back down at the computer. Three things shipped, one investigated, nothing in trading logic touched.
+
+### Merged PR #5 (the session-18 Fly.io hardening)
+
+Reviewed all five prompts in the PR body against live runtime, posted findings as a PR comment, squash-merged into `main` as `c712ce5`. Highlights:
+
+- `fly.toml` healthcheck grace period 30s → 60s is generous, not borderline — `_startup_job` runs on the scheduler thread, not in FastAPI's lifespan, so `/health` 200 returns essentially immediately after `init_db()` + `start_scheduler()`.
+- CORS allowlist parser strips whitespace, filters empty entries, no wildcards. Production Fly URL is the only HTTPS origin. `allow_credentials=True` preserved.
+- `scripts/fly-smoke.sh` covers the five class-of-bug failure modes from sessions 8/9/10/11/13/16. One small gap noted (doesn't assert `live_auto_enabled == False`); not blocking, flagged for the next session.
+- `scripts/fly-deploy.sh` uses `BASH_SOURCE`-based `SCRIPT_DIR` — cwd-safe. Verified.
+
+### Wired up GitHub Actions auto-deploy
+
+Added `.github/workflows/deploy.yml`. Triggers on `workflow_run` completion of the `tests` workflow on `main` — so a red test on `main` blocks the deploy automatically. Also supports `workflow_dispatch` for manual one-offs. No-ops cleanly if `FLY_API_TOKEN` is not set, so the repo stays cloneable/forkable.
+
+To enable, the user runs once:
+```
+fly tokens create deploy -x 999999h
+gh secret set FLY_API_TOKEN
+```
+
+After that, every merge to `main` triggers tests → deploy → `fly-smoke.sh` automatically. `scripts/fly-deploy.sh` remains as the manual escape hatch.
+
+### Reconciled the AccuWeather doc/code mismatch
+
+Earlier session notes called AccuWeather "expired"; runtime has `accuweather_cache.status=live` and the merged consensus actually weights AccuWeather at 0.40 (`_merge_forecasts` in `weather_model.py`). Updated CLAUDE.md "Known Issues" to reflect reality: AccuWeather is one of four active sources (NWS 0.60, AccuWeather 0.40, Open-Meteo 0.40, ECMWF 0.40); if the key actually does expire, `_fetch_accuweather_forecast` gracefully degrades to three sources with no operator action needed.
+
+### CLV regression deep-dive (recent_30 -10.13c, brain dropped 82 → 66)
+
+Ran a focused agent investigation against the live DB and the four named hypotheses from the handoff. Result: **it's variance + one bad day, not a failure of the session 15-16 changes**.
+
+Specific findings:
+
+- **Single-day batch effect.** Recent_30 spans only 2026-06-02 to 2026-06-03. 2026-06-03 alone is -$10.47 / -0.119 CLV. That one day is essentially the entire window. 11 of 30 trades lost; the rest were wins. 63% win rate on the window is still above break-even.
+- **Position sizing concentration.** 25 of the 30 trades were sized at 3 contracts. One bad weather day with most positions at max contracts is exactly the failure mode this produces.
+- **`fill_model` field is missing from persisted alert details.** Session 15 added it to the recommendation result but it's not landing in `alerts.details` rows. Real logging bug — we currently *can't* forward-validate the midpoint vs ask fill question from history. Worth tracing the serialization next session.
+- **Slice calibration is now applying broadly.** All 38 (city, market_type) slices have crossed 20 samples. Biases are uniformly *positive* (+0.08 to +0.49), which raises model_prob and therefore lowers NO-side prob — making NO entries harder to qualify, not easier. Calibration is currently a brake, not an accelerator.
+- **Intraday observation override never fires.** Scans run ~13:30 local; the late-day gate is hour ≥17 for HIGH, ≥10 for LOW. The override is dormant for HIGH markets entered at 13:30.
+- **ECMWF disagreement is a weak signal.** 7/30 trades had ECMWF as 4th source; sample too small to draw conclusions.
+
+**What to investigate next session (do not fix now):**
+
+1. Per-weather-event sizing cap so one scan can't stamp 30+ same-direction trades all at max contracts on the same weather day. This is the highest-leverage change.
+2. Trace where `fill_model` should be landing in `alerts.details` and patch the serialization. Without this, no forward-validation conclusion about fill model can be drawn.
+3. Investigate why calibration bias is uniformly positive across every slice. If raw model_prob is consistently below settlement rate, that's a sigma question — but it's a tuning question, not a regression.
+
+**What NOT to do:** don't change blockers, don't change sigma, don't change calibration safeguards, don't re-enable explore. The strategy zone is still profitable (+\$20.80 on 364 settlements, 73.9% win rate). Wait 2-3 more scan cycles for the variance to wash out.
+
+### Verification
+
+- PR #5 squash-merged at `c712ce5`. Worktree fast-forwarded.
+- `scripts/fly-smoke.sh --local` against live local bot → **PASS** on all five endpoints (brain 66, recent_30 -10.13c CLV, entry_quality_ok=false, paper-only).
+- 146/146 backend tests pass (unchanged from PR #5).
+- `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/deploy.yml'))"` parses clean.
+- AccuWeather code path verified intact (`grep -rn accuweather backend/app` returns 50+ active references in `weather_model.py`).
+
+### Cross-agent coordination
+
+Session 19's PR (separate from PR #5) will land deploy.yml + the CLAUDE.md updates + the AccuWeather reconciliation + this session entry, with explicit Codex review prompts for each. No silent merges between agents.
+
+## What Was Done (2026-06-02, session 18 — Claude/Opus)
+
+Pre-flight hardening of the Fly.io deploy path. Shipped as PR #5, merged in session 19. Three operational gaps closed against the running local bot and the existing Codex deploy artifacts:
+
+- `fly.toml` healthcheck `grace_period` 30s → 60s so a cold-start `_startup_job` chain can't get killed mid-init.
+- CORS allowlist now includes the production Fly URL plus an optional `CORS_ORIGINS` env var (comma-separated, whitespace stripped). `allow_credentials=True` preserved, no wildcards.
+- New `scripts/fly-smoke.sh` smoke test covers the five known failure-mode classes from sessions 8/9/10/11/13/16. `scripts/fly-deploy.sh` now invokes it after the initial `/health` probe and fails the deploy if it doesn't pass.
+
+146/146 backend tests pass. `scripts/fly-smoke.sh --local` verified against running local bot.
 
 ## What Was Done (2026-06-01, session 17 — Claude/Opus)
 
@@ -455,7 +530,7 @@ SQLite at `data/sibylla.db`. Key tables: `trades`, `alerts`, `adaptive_segments`
 
 ## Known Issues
 
-- **AccuWeather API key EXPIRED** — but no longer needed. Open-Meteo (free, no key) is now the second forecast source. AccuWeather can be re-added if you get a new API key; the code still supports it as a third source.
+- **AccuWeather is active.** Earlier session notes called it "expired" — that's stale. Live runtime shows `accuweather_cache.status=live` and the consensus uses 4 sources at the documented weights: NWS 0.60, AccuWeather 0.40, Open-Meteo 0.40, ECMWF 0.40 (`_merge_forecasts` in `weather_model.py`). If the key actually expires, `_fetch_accuweather_forecast` gracefully degrades to 3 sources — no operator action needed.
 - **Overall P&L still negative** — -$222.11 total (includes bulk_cleanup/paper_reset garbage). Strategy-filtered P&L with city blockers is +$30.79 retroactively, but this needs live validation.
 - **City blockers are retroactive estimates** — The 8 blocked combos are based on 7-15 historical trades each. Need 50+ new settlements under these rules to confirm the improvement holds forward.
 - **24 open trades from May 22** — stuck because bot was down for 3 days. Will auto-settle on next Docker start.
