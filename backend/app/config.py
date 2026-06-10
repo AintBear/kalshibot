@@ -39,6 +39,14 @@ _defaults = {
     # still negative on the strategy slice.
     "min_volume_24h": 25.0,
     "min_open_interest": 0.0,
+    # Entry window: only enter when the market closes within this many hours.
+    # Settled-trade audit (2026-06-10, n=734 non-explore market_closed): entries
+    # <=12h to close earned +13.06c/contract (n=48, t=+2.49) while entries >24h
+    # out lost -7.32c/contract (n=551). Within 12h the day's weather is partly
+    # observable, so the model finally knows something the market hasn't priced;
+    # further out the market is the better forecaster (Brier 0.205 vs 0.296).
+    # Set to 0 to disable the gate.
+    "max_entry_hours_to_close": 12.0,
     # ECMWF (European weather model) via Open-Meteo — independent of NWS/GFS,
     # so its agreement/disagreement is a real confidence signal. Set false to
     # save one HTTP call per scan if the third source is causing rate issues.
