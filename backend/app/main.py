@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 logging.basicConfig(level=logging.INFO)
 
 from app.database import init_db
-from app.routers import health, scan, alerts, overview, brain, kalshi, trades as trades_router, settings as settings_router, auto_trade as auto_trade_router, weather_events as weather_events_router, realtime as realtime_router
+from app.routers import health, scan, alerts, overview, brain, kalshi, trades as trades_router, settings as settings_router, auto_trade as auto_trade_router, weather_events as weather_events_router, realtime as realtime_router, risk as risk_router
 
 
 @asynccontextmanager
@@ -56,3 +56,4 @@ app.include_router(settings_router.router, prefix="/api")
 app.include_router(auto_trade_router.router, prefix="/api")
 app.include_router(weather_events_router.router, prefix="/api")
 app.include_router(realtime_router.router, prefix="/api")
+app.include_router(risk_router.router, prefix="/api")

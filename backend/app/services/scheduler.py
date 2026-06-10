@@ -282,6 +282,12 @@ def _order_monitor_job():
             check_live_trade_exits,
         )
         _ORDER_MONITOR_TICKS += 1
+        # Loss limits first: a breach reverts to paper before anything else
+        # this tick can submit an order. No-op in paper mode.
+        from app.services.risk import check_loss_limits
+        limits = check_loss_limits()
+        if limits.get("breached"):
+            logger.error("Loss limit breached: %s", limits["breached"])
         # Settlement sweep is heavier; run it every 10th tick (~10 min).
         if _ORDER_MONITOR_TICKS % 10 == 1:
             settlement_result = settle_expired_open_trades()

@@ -63,6 +63,17 @@ _defaults = {
     "live_max_chase_cents": 3,
     "live_cross_minutes_to_close": 45,
     "live_max_requotes_per_order": 10,
+    # Risk layer. kill_switch blocks all new entries (paper + live) and
+    # cancels working live entries; exits stay allowed. Loss limits are
+    # realized live P&L in trailing 1d/7d windows; a breach reverts to paper
+    # AND trips the kill switch. Caps default to the capped-pilot numbers in
+    # docs/STRATEGY_RECOMMENDATIONS.md §6 (owner must still confirm before
+    # any live order). All inert while paper_trading=true.
+    "kill_switch": False,
+    "live_daily_loss_limit": 5.0,
+    "live_weekly_loss_limit": 15.0,
+    "live_max_total_exposure": 25.0,
+    "live_max_contracts_per_trade": 2,
     "max_contracts_per_trade": 5,
     "stop_loss_pct": 0.50,
     "take_profit_pct": 0.50,

@@ -33,6 +33,10 @@ def place_order(
     settings = _get_settings()
     is_paper = settings.get("paper_trading", True)
 
+    from app.services.risk import kill_switch_active
+    if kill_switch_active(settings):
+        raise RuntimeError("kill switch is active: no new entries (paper or live)")
+
     if stop_loss_price is not None:
         stop_loss_price = round(float(stop_loss_price), 4)
     elif stop_loss_pct is not None:
@@ -113,6 +117,16 @@ def _live_place(
     stop_loss_price: Optional[float],
     take_profit_price: Optional[float] = None,
 ) -> dict:
+    # Risk gauntlet: every live order passes pre-trade checks or dies here.
+    from app.services.risk import pre_trade_checks
+    from app.services.audit import audit as _audit
+
+    violations = pre_trade_checks(market_ticker, direction, entry_price, contracts)
+    if violations:
+        _audit("live_entry_blocked", ticker=market_ticker, violations=violations,
+               price=entry_price, contracts=contracts, direction=direction)
+        raise RuntimeError(f"pre-trade checks failed: {'; '.join(violations)}")
+
     logger.info("LIVE order: %s %s @ %.4f x%d", direction, market_ticker, entry_price, contracts)
     conn = _get_conn()
     trade_cur = conn.execute(
@@ -549,6 +563,10 @@ def manage_working_orders() -> dict:
         return {"skipped": True, "reason": "paper mode"}
     if not settings.get("live_requote_enabled", True):
         return {"skipped": True, "reason": "live_requote_enabled=false"}
+    from app.services.risk import kill_switch_active, cancel_all_working_live_entries
+    if kill_switch_active(settings):
+        cancelled = cancel_all_working_live_entries(reason="kill switch active")
+        return {"skipped": True, "reason": "kill switch active", "cancelled": cancelled}
 
     from app.services.audit import audit
 
