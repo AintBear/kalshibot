@@ -90,7 +90,9 @@ def start_scheduler():
     )
     _scheduler.add_job(
         _order_monitor_job,
-        trigger=IntervalTrigger(minutes=10),
+        # 1-minute cadence: live working orders must re-quote and live SL/TP
+        # must fire promptly. Every sub-task no-ops in paper mode.
+        trigger=IntervalTrigger(minutes=1),
         id="order_monitor",
         replace_existing=True,
         misfire_grace_time=300,
@@ -263,17 +265,43 @@ def _weather_events_job():
         return {"error": str(e)}
 
 
+_ORDER_MONITOR_TICKS = 0
+
+
 def _order_monitor_job():
+    global _ORDER_MONITOR_TICKS
     try:
-        from app.services.order_manager import monitor_live_orders
-        from app.services.trade_lifecycle import settle_expired_open_trades, check_live_prices
-        settlement_result = settle_expired_open_trades()
-        if settlement_result.get("settled", 0) > 0:
-            logger.info("Order monitor: settled %d expired paper trades", settlement_result["settled"])
+        from app.services.order_manager import (
+            monitor_live_orders,
+            manage_working_orders,
+            reconcile_with_kalshi,
+        )
+        from app.services.trade_lifecycle import (
+            settle_expired_open_trades,
+            check_live_prices,
+            check_live_trade_exits,
+        )
+        _ORDER_MONITOR_TICKS += 1
+        # Settlement sweep is heavier; run it every 10th tick (~10 min).
+        if _ORDER_MONITOR_TICKS % 10 == 1:
+            settlement_result = settle_expired_open_trades()
+            if settlement_result.get("settled", 0) > 0:
+                logger.info("Order monitor: settled %d expired paper trades", settlement_result["settled"])
         result = monitor_live_orders()
         if result.get("filled", 0) > 0:
             logger.info("Order monitor: %d orders filled", result["filled"])
             check_live_prices()
+        work = manage_working_orders()
+        if work.get("requoted") or work.get("crossed") or work.get("abandoned"):
+            logger.info("Order working-loop: %s", work)
+        exits = check_live_trade_exits()
+        if exits.get("exits_submitted"):
+            logger.info("Live risk exits submitted: %s", exits)
+        # Reconcile DB vs Kalshi truth every 15th tick (~15 min), live only.
+        if _ORDER_MONITOR_TICKS % 15 == 0:
+            recon = reconcile_with_kalshi()
+            if recon.get("mismatches"):
+                logger.error("RECONCILE MISMATCH vs Kalshi: %s", recon["mismatches"])
     except Exception as e:
         logger.error("Order monitor error: %s", e)
 

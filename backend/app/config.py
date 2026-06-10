@@ -53,6 +53,16 @@ _defaults = {
     "ecmwf_enabled": True,
     "automation_enabled": False,
     "auto_trade_enabled": False,
+    # Live execution engine (inert while paper_trading=true). Entries post
+    # passively at bid+1c; if outbid, cancel/re-post chasing at most
+    # live_max_chase_cents above the original price; inside
+    # live_cross_minutes_to_close the order crosses the spread (a passive
+    # order that dies unfilled at close has negative expected value vs the
+    # measured <=12h entry edge).
+    "live_requote_enabled": True,
+    "live_max_chase_cents": 3,
+    "live_cross_minutes_to_close": 45,
+    "live_max_requotes_per_order": 10,
     "max_contracts_per_trade": 5,
     "stop_loss_pct": 0.50,
     "take_profit_pct": 0.50,

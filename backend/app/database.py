@@ -220,6 +220,20 @@ def _run_migrations(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_price_snapshots_ticker_time
             ON price_snapshots(market_ticker, created_at);
 
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT NOT NULL,
+            actor TEXT DEFAULT 'system',
+            market_ticker TEXT,
+            trade_id INTEGER,
+            order_id INTEGER,
+            details TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
+        CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
+
         CREATE TABLE IF NOT EXISTS model_calibration (
             city TEXT NOT NULL,
             market_type TEXT NOT NULL,
@@ -240,6 +254,12 @@ def _run_migrations(conn: sqlite3.Connection):
     # P&L for ride-to-settlement trades — see docs/STRATEGY_RECOMMENDATIONS.md §5.
     _ensure_column(conn, "trades", "close_mark_yes", "REAL")
     _ensure_column(conn, "trades", "true_clv", "REAL")
+    # Live execution layer: deterministic idempotency key, re-quote tracking,
+    # and order purpose (entry vs exit) for the work-the-bid engine.
+    _ensure_column(conn, "orders", "client_order_id", "TEXT")
+    _ensure_column(conn, "orders", "requote_count", "INTEGER DEFAULT 0")
+    _ensure_column(conn, "orders", "purpose", "TEXT DEFAULT 'entry'")
+    _ensure_column(conn, "orders", "exit_reason", "TEXT")
     _ensure_column(conn, "adaptive_segments", "positive_clv_rate", "REAL DEFAULT 0.0")
     _ensure_column(conn, "adaptive_segments", "recent_avg_clv", "REAL DEFAULT 0.0")
     _ensure_column(conn, "adaptive_segments", "recent_positive_clv_rate", "REAL DEFAULT 0.0")
