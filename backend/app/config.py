@@ -63,6 +63,15 @@ _defaults = {
     "live_max_chase_cents": 3,
     "live_cross_minutes_to_close": 45,
     "live_max_requotes_per_order": 10,
+    # Settlement sniper: trades only MATHEMATICALLY decided markets (observed
+    # high already above a bracket / observed low already below one) that the
+    # market still misprices by sniper_min_edge_cents. Margin absorbs
+    # grid-vs-station skew. Paper-only until sniper_live_enabled (owner call).
+    "sniper_enabled": True,
+    "sniper_live_enabled": False,
+    "sniper_margin_f": 1.5,
+    "sniper_min_edge_cents": 5,
+    "sniper_max_open": 20,
     # Risk layer. kill_switch blocks all new entries (paper + live) and
     # cancels working live entries; exits stay allowed. Loss limits are
     # realized live P&L in trailing 1d/7d windows; a breach reverts to paper

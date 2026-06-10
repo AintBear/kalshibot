@@ -196,6 +196,7 @@ def get_observed_extremes(lat: float, lon: float, target_date: str) -> dict:
         "observed_low": round(min(observed_temps), 2),
         "current_temp": round(float(current_temp), 2) if current_temp is not None else None,
         "local_hour": local_now.hour,
+        "local_date": local_now.date().isoformat(),
         "latest_obs_iso": latest_obs_iso,
         "samples": len(observed_temps),
         "reason": None,

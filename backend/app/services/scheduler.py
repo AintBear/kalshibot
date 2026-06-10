@@ -317,6 +317,18 @@ def _order_monitor_job():
         exits = check_live_trade_exits()
         if exits.get("exits_submitted"):
             logger.info("Live risk exits submitted: %s", exits)
+        # Settlement sniper: catch already-decided-but-mispriced markets
+        # between scans. Every 2nd tick (~2 min) — obs are cached 10 min.
+        if _ORDER_MONITOR_TICKS % 2 == 0:
+            try:
+                from app.services.settlement_sniper import run_sniper_scan
+                snipe = run_sniper_scan()
+                if snipe.get("entered"):
+                    logger.info("Sniper entered %d decided markets: %s",
+                                snipe["entered"],
+                                [o["ticker"] for o in snipe.get("opportunities", [])])
+            except Exception as snipe_exc:
+                logger.error("Sniper scan error: %s", snipe_exc)
         # Reconcile DB vs Kalshi truth every 15th tick (~15 min), live only.
         if _ORDER_MONITOR_TICKS % 15 == 0:
             recon = reconcile_with_kalshi()
