@@ -102,11 +102,30 @@ Full evidence with queries and sample sizes in **`docs/STRATEGY_RECOMMENDATIONS.
 - **Live Kalshi balance verified from this box: $15.71** (auth works end-to-end). NOTE: this is below the proposed $25 exposure cap — at GO LIVE either deposit more or the pilot is ~10-15 one-contract trades. Owner call.
 - All parallel automations verified running: scheduler (scan 15m / auto-entry 5m / order-monitor 1m / learning refresh), Task Scheduler watchdog (5m, healthy ticks, poked auto-entry safely), realtime WS feed (353 tickers, 5k+ snapshots), SSE stream.
 
+### Owner session 2026-06-10 (afternoon): goal steps 0-3 SHIPPED, 4-6 remain
+
+Owner directive: complete improvement steps 1-6. Steps 0-3 done this session (all merged to `main` — the Mac needs only `git pull`, no USB):
+
+- **Step 0**: PR #6 + #7 merged to main; CLAUDE.md conflict resolved keeping both session-19 records (Mac + Windows). Trades now freeze entry-time fill context (`fill_model`, `entry_side_bid/ask`) — alert recs are recomputed every scan, so the trade row is the only durable record (closes the Mac's PR #6 fill_model finding properly).
+- **Step 1 — per-city forecast-error model (THE root-cause fix)**: measured near-close forecast error is sigma ~2.2F (HIGH) / ~4.0F (LOW); the model ran 9.0/8.0 — 2-4x too wide. That gap IS the "raw 0.10 settles YES 0.35" miscalibration. New `app/services/forecast_skill.py` learns per-(series,kind) bias+stdev from settled YES brackets (which pin the actual temp within 1F); min 8 samples, blends to pooled global below 20, clamps to [1.0, legacy] (can only sharpen, never widen; thin data falls back to legacy). 39 series learned live (Vegas highs sigma 1.0, DC lows 3.63). Also backfilled `forecast_snapshots` actuals (was 11.3k rows with ZERO resolved → 1,500 resolved; grows every learning refresh).
+- **Step 2 — settlement sniper** (`app/services/settlement_sniper.py`): trades only MATHEMATICALLY decided markets (observed high already above bracket cap / low already below floor — monotonicity, not forecasts) still mispriced ≥5c. Open-Meteo hourly extremes + NWS settlement-station current temp (blended only when city-local day == event day, so a next-day temp can't fabricate certainty). Runs every ~2min from the order monitor to catch mispricings between scans; 1-contract paper entries tagged `learning_mode='sniper'` (held out like explore); margin 1.5F; capped 20 open; `sniper_live_enabled=false` until owner call.
+- **Step 3 — shadow-live mode**: `live_shadow_mode` (default TRUE). Real money now requires BOTH `paper_trading=false` AND `live_shadow_mode=false` — flipping live lands in shadow first by construction. In shadow, the full live engine runs (pre-trade gauntlet, work-the-bid requotes, SL/TP exit orders, fill monitor) but orders log as SHADOW-* with maker-style simulated fills, all audited.
+- **238/238 tests pass.** Branch `fable/session19-entry-window-gate`, all merged to `main`.
+
+### Remaining (steps 4-6, next session — Windows or Mac, code is on main)
+
+4. **Backtest harness on price_snapshots** — replay settled trades' price paths to grade stop/TP grids vs ride-to-settlement. Put it in `backend/analysis/` (container-mounted). Snapshots accumulate ~5k/day with 14-day retention; wait for ≥1 week of paths before drawing stop/TP conclusions.
+5. **Notifications** — `app/services/notify.py`: Discord/Telegram webhook on live fills, kill-switch, loss-limit breach, reconcile mismatch, sniper entries. Settings-driven, off by default. Cleanest integration: hook `audit()` with an action allowlist so one point covers everything.
+6. **Cloud deploy** — `.github/workflows/deploy.yml` is already on main (PR #6). One owner step remains: `fly tokens create deploy` + `gh secret set FLY_API_TOKEN`. Single-writer rule applies: a cloud deploy must not run a second trader against a divergent DB — decide which DB is truth first.
+
+**Machine-local state NOT in git (expected):** Windows runtime `config/settings.json` carries the owner's training-firehose directive (`paper_learning_explore_enabled=true`, 15/scan, 150 open) — the Mac's copy doesn't; set manually if the Mac should also firehose. DBs are divergent by design (Windows is accumulating price snapshots + true-CLV + skill data; the Mac copy is still the designated live runner's truth). The new code auto-migrates any DB on first boot.
+
 ### What remains before live
 
-1. Owner confirms §6 pilot caps + provides live Kalshi balance (loss limits as bankroll fractions).
+1. Owner confirms §6 pilot caps + tops up balance ($15.71 verified; below the $25 exposure cap).
 2. ≥30 fresh paper settlements under the 12h entry-window gate with positive expectancy AND positive true CLV (now measurable — capture is live).
-3. Owner types GO LIVE → flip `paper_trading=false` + `auto_trade_enabled=true` on ONE machine only (single-writer rule: stop the Mac first if Windows becomes the runner).
+3. Shadow-live run validates the execution engine end-to-end (orders, requotes, exits, fills) with zero real dollars.
+4. Owner types GO LIVE → flip `paper_trading=false` + `live_shadow_mode=false` + `auto_trade_enabled=true` on ONE machine only (single-writer rule: stop the Mac first if Windows becomes the runner).
 
 ## What Was Done (2026-06-04, session 19-Mac — Claude/Opus)
 
