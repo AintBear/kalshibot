@@ -134,6 +134,23 @@ def recommend_alert(alert: dict, settings: dict, explore: bool = False) -> dict:
         except (TypeError, ValueError):
             pass
 
+    # Entry window gate. Settled-trade audit (2026-06-10, 734 non-explore
+    # market_closed trades): entries <=12h to close made +13.06c/contract
+    # (n=48, t=+2.49); entries >24h out lost -7.32c/contract (n=551). The
+    # model only beats the market once part of the day is observable.
+    max_entry_hours = _safe_float(settings.get("max_entry_hours_to_close"), 12.0)
+    hours_to_close = _safe_float(details.get("hours_to_close"), None)
+    entry_window_blocker = None
+    if max_entry_hours and max_entry_hours > 0:
+        if hours_to_close is None:
+            if not is_paper:
+                entry_window_blocker = "entry window unknown (no hours_to_close; live requires it)"
+        elif hours_to_close > max_entry_hours:
+            entry_window_blocker = (
+                f"entry too early ({hours_to_close:.0f}h to close > {max_entry_hours:.0f}h window; "
+                f"edge only inside {max_entry_hours:.0f}h: +13.1c/ct n=48 vs -7.3c/ct n=551)"
+            )
+
     ticker_upper = (alert.get("market_ticker") or details.get("ticker") or "").upper()
     is_low_market = "LOW" in ticker_upper
     unlimited_paper = bool(settings.get("paper_unlimited_learning", False))
@@ -155,6 +172,8 @@ def recommend_alert(alert: dict, settings: dict, explore: bool = False) -> dict:
 
         # Soft, evidence-based blockers: suppressed in unlimited or explore mode.
         soft_off = unlimited_paper or explore
+        if not soft_off and entry_window_blocker:
+            blockers.append(entry_window_blocker)
         if not soft_off and seg_prediction_bad:
             blockers.append(f"similar predictions only {seg_prediction_accuracy * 100:.0f}% correct")
         if not soft_off and seg_trade_count >= 10 and seg_recent_clv < 0 and seg_positive_rate < 0.25:
@@ -170,6 +189,8 @@ def recommend_alert(alert: dict, settings: dict, explore: bool = False) -> dict:
         if not soft_off and forecast_distance is not None and forecast_distance <= 1.0:
             blockers.append(f"bracket within {forecast_distance:.1f}° of forecast (coin flip zone)")
     else:
+        if entry_window_blocker:
+            blockers.append(entry_window_blocker)
         if not seg_auto_eligible:
             blockers.append("similar trades have not earned auto sizing")
         if seg_prediction_bad:
@@ -649,6 +670,15 @@ def _kelly_fraction(probability: float, entry_price: float) -> float:
         return 0.0
     kelly = (p * b - (1.0 - p)) / b
     return max(0.0, min(1.0, kelly))
+
+
+def _safe_float(value, default):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _bounded(value) -> float:

@@ -4,6 +4,44 @@ import {
   CartesianGrid, Tooltip, ResponsiveContainer, Cell, ReferenceLine,
 } from 'recharts'
 import { fmtMoney, segmentLabel, stateLabel } from '../utils/format'
+import { useNarration, usePulse } from '../utils/stream'
+
+const NARRATION_COLORS = { audit: 'var(--amber)', scan: 'var(--sky)', alert: 'var(--text-muted)', trade: 'var(--green)' }
+
+function LiveThoughts() {
+  const lines = useNarration(60)
+  const pulse = usePulse()
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <div style={{ fontWeight: 700, letterSpacing: '0.04em', fontSize: '0.8rem', textTransform: 'uppercase' }}>
+          Live Thoughts
+        </div>
+        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+          <span className={`status-dot ${pulse?.feed?.connected ? 'dot-online' : 'dot-offline'}`} style={{ display: 'inline-block', marginRight: 6 }} />
+          {pulse?.feed?.connected
+            ? `streaming ${pulse.feed.subscribed_tickers} markets · scan ${pulse.scan?.stage || 'idle'}`
+            : 'feed reconnecting…'}
+        </div>
+      </div>
+      <div style={{ maxHeight: 260, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {lines.length === 0 && (
+          <div style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>
+            Quiet right now — thoughts appear here the moment the bot scans, scores, blocks, or trades.
+          </div>
+        )}
+        {lines.map((l, i) => (
+          <div key={`${l.at}-${i}`} style={{ display: 'flex', gap: 8, fontSize: '0.78rem', lineHeight: 1.5 }}>
+            <span style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+              {(l.at || '').slice(11, 19) || '—'}
+            </span>
+            <span style={{ color: NARRATION_COLORS[l.kind] || 'var(--text)', wordBreak: 'break-word' }}>{l.text}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 function ChartTip({ active, payload }) {
   if (!active || !payload?.length) return null
@@ -450,6 +488,8 @@ export default function Brain() {
           </button>
         </div>
       </div>
+
+      <LiveThoughts />
 
       {/* Hero section: Gauge + Status + Quick stats */}
       <div className="brain-hero">

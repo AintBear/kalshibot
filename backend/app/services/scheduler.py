@@ -90,7 +90,9 @@ def start_scheduler():
     )
     _scheduler.add_job(
         _order_monitor_job,
-        trigger=IntervalTrigger(minutes=10),
+        # 1-minute cadence: live working orders must re-quote and live SL/TP
+        # must fire promptly. Every sub-task no-ops in paper mode.
+        trigger=IntervalTrigger(minutes=1),
         id="order_monitor",
         replace_existing=True,
         misfire_grace_time=300,
@@ -263,17 +265,49 @@ def _weather_events_job():
         return {"error": str(e)}
 
 
+_ORDER_MONITOR_TICKS = 0
+
+
 def _order_monitor_job():
+    global _ORDER_MONITOR_TICKS
     try:
-        from app.services.order_manager import monitor_live_orders
-        from app.services.trade_lifecycle import settle_expired_open_trades, check_live_prices
-        settlement_result = settle_expired_open_trades()
-        if settlement_result.get("settled", 0) > 0:
-            logger.info("Order monitor: settled %d expired paper trades", settlement_result["settled"])
+        from app.services.order_manager import (
+            monitor_live_orders,
+            manage_working_orders,
+            reconcile_with_kalshi,
+        )
+        from app.services.trade_lifecycle import (
+            settle_expired_open_trades,
+            check_live_prices,
+            check_live_trade_exits,
+        )
+        _ORDER_MONITOR_TICKS += 1
+        # Loss limits first: a breach reverts to paper before anything else
+        # this tick can submit an order. No-op in paper mode.
+        from app.services.risk import check_loss_limits
+        limits = check_loss_limits()
+        if limits.get("breached"):
+            logger.error("Loss limit breached: %s", limits["breached"])
+        # Settlement sweep is heavier; run it every 10th tick (~10 min).
+        if _ORDER_MONITOR_TICKS % 10 == 1:
+            settlement_result = settle_expired_open_trades()
+            if settlement_result.get("settled", 0) > 0:
+                logger.info("Order monitor: settled %d expired paper trades", settlement_result["settled"])
         result = monitor_live_orders()
         if result.get("filled", 0) > 0:
             logger.info("Order monitor: %d orders filled", result["filled"])
             check_live_prices()
+        work = manage_working_orders()
+        if work.get("requoted") or work.get("crossed") or work.get("abandoned"):
+            logger.info("Order working-loop: %s", work)
+        exits = check_live_trade_exits()
+        if exits.get("exits_submitted"):
+            logger.info("Live risk exits submitted: %s", exits)
+        # Reconcile DB vs Kalshi truth every 15th tick (~15 min), live only.
+        if _ORDER_MONITOR_TICKS % 15 == 0:
+            recon = reconcile_with_kalshi()
+            if recon.get("mismatches"):
+                logger.error("RECONCILE MISMATCH vs Kalshi: %s", recon["mismatches"])
     except Exception as e:
         logger.error("Order monitor error: %s", e)
 
@@ -339,17 +373,43 @@ def _stale_data_cleanup_job():
         alert_result = _expire_closed_market_alerts()
         history_result = _cleanup_old_model_history()
         trade_result = _expire_stale_open_trades()
-        if alert_result.get("expired", 0) or history_result.get("deleted", 0) or trade_result.get("expired", 0):
+        snapshot_result = _cleanup_old_price_snapshots()
+        if (alert_result.get("expired", 0) or history_result.get("deleted", 0)
+                or trade_result.get("expired", 0) or snapshot_result.get("deleted", 0)):
             logger.info(
-                "Stale data cleanup: alerts=%s history=%s trades=%s",
+                "Stale data cleanup: alerts=%s history=%s trades=%s snapshots=%s",
                 alert_result,
                 history_result,
                 trade_result,
+                snapshot_result,
             )
-        return {"alerts": alert_result, "history": history_result, "trades": trade_result}
+        return {
+            "alerts": alert_result,
+            "history": history_result,
+            "trades": trade_result,
+            "snapshots": snapshot_result,
+        }
     except Exception as e:
         logger.error("Stale data cleanup error: %s", e)
         return {"error": str(e)}
+
+
+def _cleanup_old_price_snapshots(days: int = 14) -> dict:
+    """Bound price_snapshots growth. Trade rows are never touched; true CLV and
+    close marks are copied onto trades at settlement, so old paths are safe to
+    drop after the stop/TP backtest window."""
+    from app.database import get_conn
+
+    conn = get_conn()
+    try:
+        result = conn.execute(
+            "DELETE FROM price_snapshots WHERE created_at <= datetime('now', ?)",
+            (f"-{int(days)} days",),
+        )
+        conn.commit()
+        return {"deleted": result.rowcount if result.rowcount and result.rowcount > 0 else 0}
+    finally:
+        conn.close()
 
 
 def _expire_closed_market_alerts(hours: int = 48) -> dict:

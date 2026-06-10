@@ -621,6 +621,7 @@ class TestPositionSizingTiers(unittest.TestCase):
                 "brain_state": "paper_ready",
                 "confidence": 0.70,
                 "details": {
+                    "hours_to_close": 8.0,
                     "brain": {
                         "score": 88,
                         "state": "paper_ready",

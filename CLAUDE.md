@@ -1,8 +1,10 @@
 # KalshiBot - Project Instructions
 
-## Bot Status (updated 2026-06-04, session 19 — verified from live API + DB)
+## Bot Status (updated 2026-06-10, session 19-Windows — Fable, verified from DB + live API; merged with session 19-Mac of 2026-06-04)
 
-**Overall realized P&L: -$80.33** on 706 real `market_closed` settlements | **Strategy zone P&L: +$20.80** on 364 NO 20-40c bracket trades (73.9% win rate) | **21 open paper trades** | **Brain score: 66** (down 16 from session 17) | **Biggest score gap: `clv 15.0` (blended CLV -6.22c, max at +5c)** | **recent_30_avg_clv: -10.13c** | **146 tests pass**
+**Overall realized P&L: -$92.21** on 734 linked strategy settlements | **Strategy zone P&L: +$10.31** on 419 trades, but **forward (May 25+) zone expectancy is -3.2c/contract** | **Brain score: 94 (crossed 90 on 2026-06-10 — must hold through ≥30 gated settlements)** | **203 tests pass**
+
+**Session 19-Windows verdict (full evidence in `docs/STRATEGY_RECOMMENDATIONS.md`):** the market's own price is a better forecaster than the model (Brier 0.205 vs 0.296, holds forward), claimed model edge is anti-predictive (20c+ edge bucket: 48% win, -$30.81), and the 20-40c zone edge decayed to zero forward. The ONE slice with real evidence of edge: **zone entries ≤12h to close — +13.06c/contract, n=48, t=+2.49** (forward +8.73c, n=37; physical mechanism: intraday weather is partly observable near close). A `max_entry_hours_to_close=12` entry-window gate is now shipped (soft in paper, unconditional in live). Session 19-Mac (2026-06-04) independently concluded the recent-CLV crash was one bad day (2026-06-03) and shipped Fly auto-deploy — both entries preserved below.
 
 **Forward validation result (session 19 deep dive): the recent_30 regression is variance + one bad day, not a failure of the session 15-16 changes.** 2026-06-03 alone contributed -$10.47 / -0.119 CLV — 31 NO-bracket trades from a single scan, 25/30 sized at 3 contracts, 11 lost. That single day swamps the LIMIT 30 window. The bot was still 63% accurate on those 30 trades (above break-even); the losses were just clustered and large. Daily CLV across the last 21 days has a median near zero with 2026-06-03 as the only meaningful outlier. **Live gate stays closed; no trading logic changes shipped this session.** Wait for 2-3 more scan/settlement cycles before re-evaluating.
 
@@ -28,18 +30,18 @@ Session 12 added a macOS launchd watchdog. It starts Docker Compose if down, res
 
 Session 13 fixed paper visibility and paper-fill realism. The Paper page now shows 77 open trades, bid-mark P&L, spread, and mark type. Manual paper entry now hard-refreshes the selected Kalshi market at click time and refuses to fill if live bid/ask cannot be refreshed.
 
-| Gate                        | Current (verified 2026-06-04) | Target     | Status |
-|-----------------------------|-------------------------------|------------|--------|
-| Strategy zone win rate      | 73.9% (364 settlements)       | >= 70%     | PASS   |
-| Strategy zone P&L           | +$20.80                       | >= $0      | PASS   |
-| Overall realized P&L        | -$80.33 (706 settlements)     | >= $0      | FAIL   |
-| Recent-30 avg CLV           | -10.13c                       | >= 0c      | FAIL   |
-| Recent-30 P&L               | -$8.55                        | >= $0      | FAIL   |
-| Bot entering new trades     | yes (21 open paper)           | yes        | PASS   |
-| Brain trust score           | 66                            | >= 90      | FAIL   |
-| Kalshi credentials          | configured                    | configured | PASS   |
-| Forecast sources            | NWS + AccuWeather + Open-Meteo + ECMWF (4 active) | working | PASS |
-| Auto-deploy to Fly.io       | wired (FLY_API_TOKEN required) | optional  | READY  |
+| Gate                        | Current (verified 2026-06-10)| Target     | Status |
+|-----------------------------|----------------------------|------------|--------|
+| Strategy zone win rate      | 71.6% all-time (419); 62.4% Jun-forward | >= 70% forward | FAIL forward |
+| Strategy zone P&L           | +$10.31 all-time; -$13.20 Jun-forward | >= $0 forward | FAIL forward |
+| Zone ∩ ≤12h entries (new pilot slice) | +13.06c/ct, n=48, t=+2.49 | >= 30 fresh gated settlements, positive | VALIDATING |
+| Overall realized P&L        | -$92.21 (734 settlements)  | >= $0      | FAIL   |
+| Bot entering new trades     | yes (12h gate + explore firehose 15/scan) | yes | PASS |
+| Brain trust score           | 94 (crossed 90 on 2026-06-10) | >= 90   | PASS (must hold) |
+| Kalshi credentials          | configured (live balance $15.71 verified) | configured | PASS |
+| Auto-eligible segments      | 5 (paper)                  | >= 1       | PASS   |
+| Forecast sources            | NWS + AccuWeather + Open-Meteo + ECMWF | working | PASS  |
+| Auto-deploy to Fly.io       | wired (FLY_API_TOKEN required) | optional | READY |
 
 ## Daily Improvement System
 
@@ -53,7 +55,60 @@ Each session, do exactly two things from this priority list (top = highest impac
 
 After each session, update the status table above and note what changed.
 
-## What Was Done (2026-06-04, session 19 — Claude/Opus)
+## What Was Done (2026-06-10, session 19-Windows — Fable)
+
+First session on the Windows PC after the USB port. Standing mission accepted: live-capable, hedge-fund-grade trader by June 22 with a capped pilot (owner types GO LIVE first; this box stays dev/paper until the deliberate runner switch).
+
+### Workstream 0: port verified end-to-end
+
+- All four runtime-file checksums match `PORT_MANIFEST.txt` (DB, private key, settings.json, .env). Git intact at `c712ce5` (session 18).
+- Bundle copied OneDrive → `C:\kalshibot` (OneDrive sync corrupts SQLite; the documented no-sync rule). OneDrive copy left as a frozen backup; checksums re-verified after copy.
+- `docker compose up -d --build` clean. `/health` ok. Frontend 200. Fresh live scan: **463/463 markets, 0 series errors, 13 alerts, 2 paper trades**. AccuWeather cache live. **153/153 tests pass** (146 carried + 7 new).
+- Brain computes **66 here, not the handoff's ~82**: the startup settlement job settled the carried-over open trades and the fresh JUN settlements dragged the recent windows negative. Not a port defect — it's the forward-validation answer arriving (see below). 8 JUN09 trades settled at boot are still `settlement_result='pending'` awaiting backfill — watch them.
+
+### Workstream 1: data-driven parameter discovery (the big one)
+
+Full evidence with queries and sample sizes in **`docs/STRATEGY_RECOMMENDATIONS.md`**; reproducible read-only scripts in `scripts/analysis/ws1_*.py`. Key findings:
+
+1. **The market beats the model.** Brier on 734 linked settlements: market 0.205, model 0.296 — and it holds on the forward window (0.213 vs 0.261). Claimed model edge is *anti-predictive*: the 20c+ edge bucket won 48.1% and lost -$30.81. The bot's selected markets settle YES more often than priced — it has been selling the underpriced side.
+2. **Zone edge decayed to zero forward.** Pre-May 25: +$25.61 (n=256, 76.2%). May 25-31: -$2.10 (n=54). Jun 1+: -$13.20 (n=109, 62.4%). Forward expectancy -3.19c/ct ± 3.7 SE.
+3. **Entry timing is the one real edge.** Zone entries ≤12h to close: **+13.06c/contract (n=48, t=+2.49)**, forward +8.73c (n=37), positive in both price buckets and both months. Entries >24h out: -7.32c/ct (n=551). Mechanism: near close, intraday weather is observable; far out, the market is the better forecaster.
+4. **"CLV" in the DB is mislabeled** — for settlement-riding trades it equals per-contract P&L, not closing-line value. True CLV needs pre-close price capture, which doesn't exist (no price-path table). WS3's WebSocket feed will capture it.
+5. **Calibration: leave as is.** 18 slices now ≥20 samples, all positive bias (model underestimates YES everywhere), clamp +0.15 working as designed. Raising the clamp would just reproduce the market price. Isotonic identity remains correct.
+
+### Shipped (data-supported)
+
+- **`max_entry_hours_to_close=12` entry-window gate** in `position_sizing.py` + `config.py` + `settings.example.json`. Soft blocker in paper strict mode (explore still samples far entries to keep evidence accumulating); unconditional in live, where a missing `hours_to_close` also blocks. 7 new tests in `test_entry_window.py`; one live-mode test updated to carry `hours_to_close`. 153/153 green.
+
+### Proposed, NOT shipped (await owner)
+
+- Capped-pilot caps (§6 of the doc): universe = zone ∩ ≤12h only, max 2 contracts/trade, $25 total exposure, $5/$15 daily/weekly loss limits with auto-revert to paper, go-live only after ≥30 fresh gated paper settlements with positive expectancy and positive true CLV. Need live Kalshi balance to express as bankroll fractions.
+
+### Workstreams 2-7: ALL SHIPPED (same session, continued 2026-06-10 morning)
+
+- **WS3 — Real-time Kalshi WebSocket feed** (`app/services/realtime.py`): authed `ticker`-channel client (RSA-PSS handshake; external-api host 404s the WS upgrade, elections host serves it — host fallback handles both). Watchlist = open trades + pending alerts. Live marks mirrored into `markets` so every endpoint sees sub-second prices. New `price_snapshots` table (30s throttle, 10s inside 30min of close, immediate on ≥2c moves; 14-day retention). **True CLV**: `trades.close_mark_yes` + `trades.true_clv` filled at settlement from the last pre-close snapshot — never fabricated. Overnight validation: 8 settled trades now carry real true-CLV values. `/api/realtime/status` + `/api/realtime/quotes`.
+- **WS2 — Desk-grade execution** (`order_manager.py`): work-the-bid engine (re-post at bid+1c when outbid, chase capped at +3c, cross inside 45min of close, abandon when budgets exhaust — pure `requote_decision()` unit-tested), real live exits (actual Kalshi sell orders: stop-loss crosses, take-profit rests; trade closes only on confirmed fill at the real price — the old `_live_close` never sold on Kalshi), deterministic idempotent `client_order_id`, reconciliation vs `/portfolio/positions` every ~15min (mismatches audited, never auto-mutated). Order monitor cadence 10m → 1m.
+- **WS4 — Risk & security** (`app/services/risk.py` + `/api/risk/*`): hard kill-switch (blocks ALL new entries paper+live, cancels working live entries, leaves exits alive, fails closed), daily/weekly live loss limits checked every minute (breach → revert to paper + kill switch + audit), pre-trade gauntlet on every live submit (price sanity, contract cap, exposure cap, duplicate guard, balance check), append-only `audit_log`. Defaults = §6 pilot caps, inert until live.
+- **WS5 — Weather pipeline verified fresh**: NWS + Open-Meteo + ECMWF merged with source-disagreement signal; intraday temps current. AccuWeather absent from `forecast_sources` despite live cache — known CODEX item 6 drift, non-blocking.
+- **WS7 — Windows watchdog**: `scripts/watchdog.ps1` (full port of watchdog.sh incl. scan-decision matrix + restart cooldown markers; also starts Docker Desktop itself — which healed a real dead-Docker morning during this session) + `scripts/install-watchdog-windows.ps1` (schtasks, every 5 min). Task `KalshibotWatchdog` registered and verified with a real run.
+- **WS6 — Sentient UI**: `GET /api/stream` (SSE) pushes live quotes, a 5s positions-P&L pulse (marked at live exit quotes), and brain narration (audit actions, scan completions, alert verdicts with blockers/drivers, trade entries). Frontend: shared EventSource (`utils/stream.js`), sidebar live P&L + one-click KILL SWITCH (arm/confirm), Brain page "Live Thoughts" feed, Dashboard "Live Marks" strip. Frontend builds clean.
+- **203/203 backend tests pass.** All commits on branch `fable/session19-entry-window-gate`.
+
+### Owner session 2026-06-10 (midday): training firehose ON + brain gate crossed
+
+- **Owner directive**: no limits on trade COUNT (paper) — maximize training sample; only bad trades stay blocked. Iron-law blockers remain active in every mode (YES-all, NO sub-20c, NO 85c+).
+- **Explore mode re-enabled** (its condition was met: the 30 held-out explore trades settled +$2.03): `paper_learning_explore_max_per_scan` 3→15, `paper_learning_explore_max_open` 30→150. First cycle entered the full 15-trade quota from 348 candidates. Explore stays tagged + held out of strategy learning, so volume cannot pollute the live-gate validation. Strict (strategy) entries still respect the 12h window — that slice is what forward-validates for live.
+- **Brain crossed 90 for the first time: score 94, `entry_quality_ok=true`, blended CLV +2.50c** — the JUN09/10 settlements under the new rules landed positive. Caveat: partly one good settlement day (mirror image of the Mac's 2026-06-03 one-bad-day finding); the ≥30-gated-settlements precondition remains the real bar.
+- **Live Kalshi balance verified from this box: $15.71** (auth works end-to-end). NOTE: this is below the proposed $25 exposure cap — at GO LIVE either deposit more or the pilot is ~10-15 one-contract trades. Owner call.
+- All parallel automations verified running: scheduler (scan 15m / auto-entry 5m / order-monitor 1m / learning refresh), Task Scheduler watchdog (5m, healthy ticks, poked auto-entry safely), realtime WS feed (353 tickers, 5k+ snapshots), SSE stream.
+
+### What remains before live
+
+1. Owner confirms §6 pilot caps + provides live Kalshi balance (loss limits as bankroll fractions).
+2. ≥30 fresh paper settlements under the 12h entry-window gate with positive expectancy AND positive true CLV (now measurable — capture is live).
+3. Owner types GO LIVE → flip `paper_trading=false` + `auto_trade_enabled=true` on ONE machine only (single-writer rule: stop the Mac first if Windows becomes the runner).
+
+## What Was Done (2026-06-04, session 19-Mac — Claude/Opus)
 
 User asked for the remaining open work to be driven to completion before they sat back down at the computer. Three things shipped, one investigated, nothing in trading logic touched.
 

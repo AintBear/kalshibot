@@ -39,12 +39,41 @@ _defaults = {
     # still negative on the strategy slice.
     "min_volume_24h": 25.0,
     "min_open_interest": 0.0,
+    # Entry window: only enter when the market closes within this many hours.
+    # Settled-trade audit (2026-06-10, n=734 non-explore market_closed): entries
+    # <=12h to close earned +13.06c/contract (n=48, t=+2.49) while entries >24h
+    # out lost -7.32c/contract (n=551). Within 12h the day's weather is partly
+    # observable, so the model finally knows something the market hasn't priced;
+    # further out the market is the better forecaster (Brier 0.205 vs 0.296).
+    # Set to 0 to disable the gate.
+    "max_entry_hours_to_close": 12.0,
     # ECMWF (European weather model) via Open-Meteo — independent of NWS/GFS,
     # so its agreement/disagreement is a real confidence signal. Set false to
     # save one HTTP call per scan if the third source is causing rate issues.
     "ecmwf_enabled": True,
     "automation_enabled": False,
     "auto_trade_enabled": False,
+    # Live execution engine (inert while paper_trading=true). Entries post
+    # passively at bid+1c; if outbid, cancel/re-post chasing at most
+    # live_max_chase_cents above the original price; inside
+    # live_cross_minutes_to_close the order crosses the spread (a passive
+    # order that dies unfilled at close has negative expected value vs the
+    # measured <=12h entry edge).
+    "live_requote_enabled": True,
+    "live_max_chase_cents": 3,
+    "live_cross_minutes_to_close": 45,
+    "live_max_requotes_per_order": 10,
+    # Risk layer. kill_switch blocks all new entries (paper + live) and
+    # cancels working live entries; exits stay allowed. Loss limits are
+    # realized live P&L in trailing 1d/7d windows; a breach reverts to paper
+    # AND trips the kill switch. Caps default to the capped-pilot numbers in
+    # docs/STRATEGY_RECOMMENDATIONS.md §6 (owner must still confirm before
+    # any live order). All inert while paper_trading=true.
+    "kill_switch": False,
+    "live_daily_loss_limit": 5.0,
+    "live_weekly_loss_limit": 15.0,
+    "live_max_total_exposure": 25.0,
+    "live_max_contracts_per_trade": 2,
     "max_contracts_per_trade": 5,
     "stop_loss_pct": 0.50,
     "take_profit_pct": 0.50,

@@ -145,6 +145,10 @@ def auto_enter_qualifying_alerts(settings_override: Optional[dict] = None) -> di
     if not paper_auto and not live_auto:
         return {"skipped": True, "reason": "auto entry disabled"}
 
+    from app.services.risk import kill_switch_active
+    if kill_switch_active(settings):
+        return {"skipped": True, "reason": "kill switch active"}
+
     # ── Brain gate ────────────────────────────────────────────────────
     from app.services.weather_brain import get_brain_status
     brain = get_brain_status()

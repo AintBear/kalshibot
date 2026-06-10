@@ -5,8 +5,41 @@ import {
   CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine,
 } from 'recharts'
 import { cleanTitle, currentTemp, fmtEdge, fmtMoney, humanizeMarketParts, isActionable, marketQuestion, opportunityEdge, optionLabel, paperActionInfo, parseApiTime, qualityScore, recommendation, segmentLabel, stateLabel } from '../utils/format'
+import { usePulse } from '../utils/stream'
 
 const fmtPct = (v, d = 1) => v == null ? '—' : `${(v * 100).toFixed(d)}%`
+
+function LivePositionsStrip() {
+  const pulse = usePulse()
+  if (!pulse || !pulse.positions?.length) return null
+  const sorted = [...pulse.positions].sort((a, b) => Math.abs(b.pnl ?? 0) - Math.abs(a.pnl ?? 0))
+  return (
+    <div className="card" style={{ marginBottom: 14, padding: '10px 14px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+        <span style={{ fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          Live Marks · {pulse.open_positions} open
+        </span>
+        <strong style={{ fontFamily: 'var(--font-mono)', color: pulse.open_pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
+          {pulse.open_pnl >= 0 ? '+' : ''}{Number(pulse.open_pnl ?? 0).toFixed(2)}
+        </strong>
+      </div>
+      <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 2 }}>
+        {sorted.slice(0, 12).map(p => (
+          <div key={p.trade_id} title={`${p.ticker} · entry ${p.entry} x${p.contracts}${p.live_quote ? ' · live tick' : ' · last scan mark'}`}
+               style={{ flex: '0 0 auto', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 6, padding: '4px 8px', fontSize: '0.7rem', fontFamily: 'var(--font-mono)' }}>
+            <div style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+              {p.direction.toUpperCase()} {p.ticker.replace(/^KX/, '')}
+              {p.live_quote && <span style={{ color: 'var(--green)' }}> ●</span>}
+            </div>
+            <div style={{ color: (p.pnl ?? 0) >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
+              {p.pnl == null ? '—' : `${p.pnl >= 0 ? '+' : ''}${p.pnl.toFixed(2)}`}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 function ChartTip({ active, payload }) {
   if (!active || !payload?.length) return null
@@ -377,6 +410,8 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
+
+        <LivePositionsStrip />
 
         <div className="dash-kpi-row compact">
           <div className="dash-kpi dash-kpi-link" onClick={() => navigate('/paper')}>

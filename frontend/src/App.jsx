@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
+import { usePulse } from './utils/stream'
 import Dashboard from './pages/Dashboard'
 import Alerts from './pages/Alerts'
 import Scanner from './pages/Scanner'
@@ -106,6 +107,46 @@ class RouteErrorBoundary extends React.Component {
   }
 }
 
+function KillSwitch({ pulse }) {
+  const [busy, setBusy] = useState(false)
+  const [armed, setArmed] = useState(false)
+  const killed = pulse?.kill_switch === true
+
+  const flip = async () => {
+    if (!killed && !armed) { setArmed(true); setTimeout(() => setArmed(false), 4000); return }
+    setBusy(true)
+    try {
+      await fetch(killed ? '/api/risk/resume' : '/api/risk/kill', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: killed ? undefined : JSON.stringify({ reason: 'one-click UI kill' }),
+      })
+    } finally {
+      setBusy(false)
+      setArmed(false)
+    }
+  }
+
+  return (
+    <button
+      className={`btn btn-sm kill-switch${killed ? ' killed' : armed ? ' armed' : ''}`}
+      onClick={flip}
+      disabled={busy}
+      title={killed ? 'Kill switch is ON — click to re-arm trading' : 'Stops all new entries and cancels working live orders'}
+      style={{
+        width: '100%',
+        background: killed ? 'var(--red)' : armed ? 'var(--amber)' : 'transparent',
+        border: '1px solid var(--red)',
+        color: killed || armed ? '#fff' : 'var(--red)',
+        fontWeight: 700,
+        letterSpacing: '0.04em',
+      }}
+    >
+      {busy ? '…' : killed ? 'KILLED — RESUME?' : armed ? 'CLICK AGAIN TO KILL' : 'KILL SWITCH'}
+    </button>
+  )
+}
+
 function NotFound() {
   return (
     <div className="empty route-error">
@@ -125,6 +166,7 @@ export default function App() {
   const [brainStatus, setBrainStatus] = useState(null)
   const [pendingAlerts, setPending] = useState(0)
   const [collapsed, setCollapsed]   = useState(false)
+  const pulse = usePulse()
 
   useEffect(() => {
     const check = () =>
@@ -218,6 +260,18 @@ export default function App() {
               <div className={`status-dot ${paper ? 'dot-paper' : 'dot-online'}`} />
               <span>{paper ? 'Paper Mode' : 'Live Trading'}</span>
             </div>
+            {pulse && (
+              <div className="footer-row" title="Open positions marked at live exit quotes (real-time)">
+                <div className={`status-dot ${pulse.feed?.connected ? 'dot-online' : 'dot-offline'}`} />
+                <span>
+                  {pulse.open_positions} open&nbsp;
+                  <strong style={{ color: pulse.open_pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                    {pulse.open_pnl >= 0 ? '+' : ''}{Number(pulse.open_pnl ?? 0).toFixed(2)}
+                  </strong>
+                </span>
+              </div>
+            )}
+            <KillSwitch pulse={pulse} />
             <div className="footer-row footer-brain">
               <span>Brain {brainStatus?.score ?? '—'}/100</span>
               <small>{brainStatus?.readiness_label || (brainStatus?.entry_quality_ok ? 'Ready for review' : 'Needs better entries')}</small>
