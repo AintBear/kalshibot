@@ -1404,12 +1404,21 @@ def _estimate_model_prob(
 
     hours = _hours_to_close(ticker, market)
 
+    # Base sigma comes from measured per-city forecast skill (settled YES
+    # brackets vs the forecast each event's last alert carried). The legacy
+    # global constants (HIGH 9.0 / LOW 8.0) were 2-4x wider than the measured
+    # near-close error (~2.2F high / ~4.0F low) — that gap was the root cause
+    # of the "raw 0.10 settles YES 0.35" miscalibration. base_sigma_for falls
+    # back to the legacy constant when evidence is thin and can only sharpen,
+    # never widen. See app/services/forecast_skill.py.
+    from app.services.forecast_skill import base_sigma_for
+
     if "HIGH" in t and high is not None:
-        sigma = _adaptive_sigma(9.0, hours, forecast)
+        sigma = _adaptive_sigma(base_sigma_for(ticker, "high"), hours, forecast)
         return _temp_market_prob(high, ticker, market, sigma=sigma, observed=observed)
 
     if "LOW" in t and low is not None:
-        sigma = _adaptive_sigma(8.0, hours, forecast)
+        sigma = _adaptive_sigma(base_sigma_for(ticker, "low"), hours, forecast)
         return _temp_market_prob(low, ticker, market, sigma=sigma, observed=observed)
 
     return None

@@ -763,14 +763,19 @@ def open_paper_trade(
     contracts: int = 1,
     stop_loss_price: Optional[float] = None,
     take_profit_price: Optional[float] = None,
+    fill_model: Optional[str] = None,
+    entry_side_bid: Optional[float] = None,
+    entry_side_ask: Optional[float] = None,
 ) -> int:
     conn = _get_conn()
     cur = conn.execute(
         """INSERT INTO trades
            (market_ticker, alert_id, direction, entry_price, contracts,
-            stop_loss_price, take_profit_price, paper, status, entry_time)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'open', datetime('now'))""",
-        (market_ticker, alert_id, direction, entry_price, contracts, stop_loss_price, take_profit_price),
+            stop_loss_price, take_profit_price, fill_model, entry_side_bid,
+            entry_side_ask, paper, status, entry_time)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'open', datetime('now'))""",
+        (market_ticker, alert_id, direction, entry_price, contracts, stop_loss_price,
+         take_profit_price, fill_model, entry_side_bid, entry_side_ask),
     )
     trade_id = cur.lastrowid
     conn.commit()

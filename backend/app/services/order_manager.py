@@ -29,6 +29,7 @@ def place_order(
     take_profit_pct: Optional[float] = None,
     stop_loss_price: Optional[float] = None,
     take_profit_price: Optional[float] = None,
+    fill_context: Optional[dict] = None,
 ) -> dict:
     settings = _get_settings()
     is_paper = settings.get("paper_trading", True)
@@ -36,6 +37,14 @@ def place_order(
     from app.services.risk import kill_switch_active
     if kill_switch_active(settings):
         raise RuntimeError("kill switch is active: no new entries (paper or live)")
+
+    # Freeze the entry-time fill context (recommendation dict works directly).
+    # Alert recommendations get recomputed every scan, so this is the only
+    # durable record of what the trade actually saw at entry.
+    fill_context = fill_context or {}
+    fill_model = fill_context.get("fill_model")
+    entry_side_bid = fill_context.get("side_bid")
+    entry_side_ask = fill_context.get("side_ask")
 
     if stop_loss_price is not None:
         stop_loss_price = round(float(stop_loss_price), 4)
@@ -55,8 +64,12 @@ def place_order(
         take_profit_price = min(max(0.01, take_profit_price), 0.99)
 
     if is_paper:
-        return _paper_place(market_ticker, direction, entry_price, alert_id, contracts, stop_loss_price, take_profit_price)
-    return _live_place(market_ticker, direction, entry_price, alert_id, contracts, stop_loss_price, take_profit_price)
+        return _paper_place(market_ticker, direction, entry_price, alert_id, contracts,
+                            stop_loss_price, take_profit_price,
+                            fill_model, entry_side_bid, entry_side_ask)
+    return _live_place(market_ticker, direction, entry_price, alert_id, contracts,
+                       stop_loss_price, take_profit_price,
+                       fill_model, entry_side_bid, entry_side_ask)
 
 
 def recommendation_exit_args(
@@ -84,6 +97,9 @@ def _paper_place(
     contracts: int,
     stop_loss_price: Optional[float],
     take_profit_price: Optional[float] = None,
+    fill_model: Optional[str] = None,
+    entry_side_bid: Optional[float] = None,
+    entry_side_ask: Optional[float] = None,
 ) -> dict:
     from app.services.trade_lifecycle import open_paper_trade
     trade_id = open_paper_trade(
@@ -94,6 +110,9 @@ def _paper_place(
         contracts=contracts,
         stop_loss_price=stop_loss_price,
         take_profit_price=take_profit_price,
+        fill_model=fill_model,
+        entry_side_bid=entry_side_bid,
+        entry_side_ask=entry_side_ask,
     )
     conn = _get_conn()
     cur = conn.execute(
@@ -116,6 +135,9 @@ def _live_place(
     contracts: int,
     stop_loss_price: Optional[float],
     take_profit_price: Optional[float] = None,
+    fill_model: Optional[str] = None,
+    entry_side_bid: Optional[float] = None,
+    entry_side_ask: Optional[float] = None,
 ) -> dict:
     # Risk gauntlet: every live order passes pre-trade checks or dies here.
     from app.services.risk import pre_trade_checks
@@ -132,9 +154,11 @@ def _live_place(
     trade_cur = conn.execute(
         """INSERT INTO trades
            (market_ticker, alert_id, direction, entry_price, contracts,
-            stop_loss_price, take_profit_price, paper, status, entry_time)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'open', datetime('now'))""",
-        (market_ticker, alert_id, direction, entry_price, contracts, stop_loss_price, take_profit_price),
+            stop_loss_price, take_profit_price, fill_model, entry_side_bid,
+            entry_side_ask, paper, status, entry_time)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'open', datetime('now'))""",
+        (market_ticker, alert_id, direction, entry_price, contracts, stop_loss_price,
+         take_profit_price, fill_model, entry_side_bid, entry_side_ask),
     )
     trade_id = trade_cur.lastrowid
     conn.commit()

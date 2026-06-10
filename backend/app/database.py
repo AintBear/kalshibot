@@ -220,6 +220,16 @@ def _run_migrations(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_price_snapshots_ticker_time
             ON price_snapshots(market_ticker, created_at);
 
+        CREATE TABLE IF NOT EXISTS city_forecast_skill (
+            series TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            sample_count INTEGER DEFAULT 0,
+            bias REAL DEFAULT 0.0,
+            error_std REAL DEFAULT 0.0,
+            updated_at TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (series, kind)
+        );
+
         CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             action TEXT NOT NULL,
@@ -254,6 +264,12 @@ def _run_migrations(conn: sqlite3.Connection):
     # P&L for ride-to-settlement trades — see docs/STRATEGY_RECOMMENDATIONS.md §5.
     _ensure_column(conn, "trades", "close_mark_yes", "REAL")
     _ensure_column(conn, "trades", "true_clv", "REAL")
+    # Entry-time fill context snapshot. The alert's recommendation is
+    # recomputed every scan, so by settlement it no longer reflects what the
+    # trade actually saw — these freeze fill_model and the touch at entry.
+    _ensure_column(conn, "trades", "fill_model", "TEXT")
+    _ensure_column(conn, "trades", "entry_side_bid", "REAL")
+    _ensure_column(conn, "trades", "entry_side_ask", "REAL")
     # Live execution layer: deterministic idempotency key, re-quote tracking,
     # and order purpose (entry vs exit) for the work-the-bid engine.
     _ensure_column(conn, "orders", "client_order_id", "TEXT")
