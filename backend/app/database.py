@@ -206,6 +206,20 @@ def _run_migrations(conn: sqlite3.Connection):
             updated_at TEXT DEFAULT (datetime('now'))
         );
 
+        CREATE TABLE IF NOT EXISTS price_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_ticker TEXT NOT NULL,
+            yes_bid REAL,
+            yes_ask REAL,
+            yes_mid REAL,
+            last_price REAL,
+            source TEXT DEFAULT 'ws',
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_price_snapshots_ticker_time
+            ON price_snapshots(market_ticker, created_at);
+
         CREATE TABLE IF NOT EXISTS model_calibration (
             city TEXT NOT NULL,
             market_type TEXT NOT NULL,
@@ -221,6 +235,11 @@ def _run_migrations(conn: sqlite3.Connection):
     _ensure_column(conn, "trades", "settlement_result", "TEXT")
     _ensure_column(conn, "trades", "prediction_correct", "INTEGER")
     _ensure_column(conn, "trades", "settlement_pnl", "REAL")
+    # True closing-line value: market price just before close (from
+    # price_snapshots) vs entry. The legacy `clv` column restates settlement
+    # P&L for ride-to-settlement trades — see docs/STRATEGY_RECOMMENDATIONS.md §5.
+    _ensure_column(conn, "trades", "close_mark_yes", "REAL")
+    _ensure_column(conn, "trades", "true_clv", "REAL")
     _ensure_column(conn, "adaptive_segments", "positive_clv_rate", "REAL DEFAULT 0.0")
     _ensure_column(conn, "adaptive_segments", "recent_avg_clv", "REAL DEFAULT 0.0")
     _ensure_column(conn, "adaptive_segments", "recent_positive_clv_rate", "REAL DEFAULT 0.0")

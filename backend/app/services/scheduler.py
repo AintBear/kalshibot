@@ -339,17 +339,43 @@ def _stale_data_cleanup_job():
         alert_result = _expire_closed_market_alerts()
         history_result = _cleanup_old_model_history()
         trade_result = _expire_stale_open_trades()
-        if alert_result.get("expired", 0) or history_result.get("deleted", 0) or trade_result.get("expired", 0):
+        snapshot_result = _cleanup_old_price_snapshots()
+        if (alert_result.get("expired", 0) or history_result.get("deleted", 0)
+                or trade_result.get("expired", 0) or snapshot_result.get("deleted", 0)):
             logger.info(
-                "Stale data cleanup: alerts=%s history=%s trades=%s",
+                "Stale data cleanup: alerts=%s history=%s trades=%s snapshots=%s",
                 alert_result,
                 history_result,
                 trade_result,
+                snapshot_result,
             )
-        return {"alerts": alert_result, "history": history_result, "trades": trade_result}
+        return {
+            "alerts": alert_result,
+            "history": history_result,
+            "trades": trade_result,
+            "snapshots": snapshot_result,
+        }
     except Exception as e:
         logger.error("Stale data cleanup error: %s", e)
         return {"error": str(e)}
+
+
+def _cleanup_old_price_snapshots(days: int = 14) -> dict:
+    """Bound price_snapshots growth. Trade rows are never touched; true CLV and
+    close marks are copied onto trades at settlement, so old paths are safe to
+    drop after the stop/TP backtest window."""
+    from app.database import get_conn
+
+    conn = get_conn()
+    try:
+        result = conn.execute(
+            "DELETE FROM price_snapshots WHERE created_at <= datetime('now', ?)",
+            (f"-{int(days)} days",),
+        )
+        conn.commit()
+        return {"deleted": result.rowcount if result.rowcount and result.rowcount > 0 else 0}
+    finally:
+        conn.close()
 
 
 def _expire_closed_market_alerts(hours: int = 48) -> dict:

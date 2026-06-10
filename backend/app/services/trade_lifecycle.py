@@ -478,6 +478,8 @@ def _close_trade(
         ) else 0
         settlement_pnl = pnl
 
+    close_mark_yes, computed_true_clv = _true_clv_fields(conn, trade)
+
     conn.execute(
         """UPDATE trades SET
              status='closed',
@@ -488,6 +490,8 @@ def _close_trade(
              settlement_result=COALESCE(?, settlement_result),
              prediction_correct=COALESCE(?, prediction_correct),
              settlement_pnl=COALESCE(?, settlement_pnl),
+             close_mark_yes=COALESCE(?, close_mark_yes),
+             true_clv=COALESCE(?, true_clv),
              exit_time=datetime('now')
            WHERE id=?""",
         (
@@ -498,6 +502,8 @@ def _close_trade(
             normalized_result,
             prediction_correct,
             settlement_pnl,
+            close_mark_yes,
+            computed_true_clv,
             trade_id,
         ),
     )
@@ -516,6 +522,29 @@ def _directional_clv(direction: str, entry_price: float, exit_price: float) -> f
     if direction == "no":
         return round(entry_price - exit_price, 4)
     return round(exit_price - entry_price, 4)
+
+
+def _true_clv_fields(conn, trade) -> tuple:
+    """(close_mark_yes, true_clv) from the realtime price-path store.
+
+    Returns (None, None) when no pre-close snapshot exists — true CLV is
+    never fabricated from settlement values.
+    """
+    try:
+        from app.services.realtime import close_mark_for, true_clv
+
+        market = conn.execute(
+            "SELECT close_time FROM markets WHERE ticker = ?",
+            (trade["market_ticker"],),
+        ).fetchone()
+        close_time = market["close_time"] if market else None
+        mark = close_mark_for(trade["market_ticker"], close_time)
+        if mark is None or trade["entry_price"] is None:
+            return None, None
+        return mark["yes_mid"], true_clv(trade["direction"], float(trade["entry_price"]), float(mark["yes_mid"]))
+    except Exception as exc:
+        logger.debug("true CLV unavailable for trade %s: %s", trade["id"], exc)
+        return None, None
 
 
 def backfill_settlements() -> dict:
@@ -561,12 +590,16 @@ def backfill_settlements() -> dict:
             settlement_pnl = pnl
 
             conn2 = _get_conn()
+            close_mark_yes, computed_true_clv = _true_clv_fields(conn2, trade)
             conn2.execute(
                 """UPDATE trades SET exit_price=?, pnl=?, clv=?,
                      exit_reason=COALESCE(exit_reason, 'market_closed'),
-                     settlement_result=?, prediction_correct=?, settlement_pnl=?
+                     settlement_result=?, prediction_correct=?, settlement_pnl=?,
+                     close_mark_yes=COALESCE(?, close_mark_yes),
+                     true_clv=COALESCE(?, true_clv)
                    WHERE id=?""",
-                (exit_price, pnl, clv, result, prediction_correct, settlement_pnl, trade["id"]),
+                (exit_price, pnl, clv, result, prediction_correct, settlement_pnl,
+                 close_mark_yes, computed_true_clv, trade["id"]),
             )
             conn2.commit()
             conn2.close()

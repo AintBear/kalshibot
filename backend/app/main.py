@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 logging.basicConfig(level=logging.INFO)
 
 from app.database import init_db
-from app.routers import health, scan, alerts, overview, brain, kalshi, trades as trades_router, settings as settings_router, auto_trade as auto_trade_router, weather_events as weather_events_router
+from app.routers import health, scan, alerts, overview, brain, kalshi, trades as trades_router, settings as settings_router, auto_trade as auto_trade_router, weather_events as weather_events_router, realtime as realtime_router
 
 
 @asynccontextmanager
@@ -15,7 +15,10 @@ async def lifespan(app: FastAPI):
     init_db()
     from app.services.scheduler import start_scheduler
     start_scheduler()
+    from app.services.realtime import feed
+    feed.start()
     yield
+    await feed.stop()
     from app.services.scheduler import stop_scheduler
     stop_scheduler()
 
@@ -52,3 +55,4 @@ app.include_router(trades_router.router, prefix="/api")
 app.include_router(settings_router.router, prefix="/api")
 app.include_router(auto_trade_router.router, prefix="/api")
 app.include_router(weather_events_router.router, prefix="/api")
+app.include_router(realtime_router.router, prefix="/api")
