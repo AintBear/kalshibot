@@ -59,10 +59,26 @@ _defaults = {
     # live_cross_minutes_to_close the order crosses the spread (a passive
     # order that dies unfilled at close has negative expected value vs the
     # measured <=12h entry edge).
+    # Shadow-live: when paper_trading=false, the FULL live engine runs
+    # (pre-trade checks, work-the-bid, requotes, exits, reconciliation paths)
+    # but orders are logged as SHADOW-* instead of being submitted to Kalshi;
+    # fills are simulated when the market trades through our price. Real
+    # money requires BOTH paper_trading=false AND live_shadow_mode=false —
+    # defense in depth so flipping live lands in shadow first.
+    "live_shadow_mode": True,
     "live_requote_enabled": True,
     "live_max_chase_cents": 3,
     "live_cross_minutes_to_close": 45,
     "live_max_requotes_per_order": 10,
+    # Settlement sniper: trades only MATHEMATICALLY decided markets (observed
+    # high already above a bracket / observed low already below one) that the
+    # market still misprices by sniper_min_edge_cents. Margin absorbs
+    # grid-vs-station skew. Paper-only until sniper_live_enabled (owner call).
+    "sniper_enabled": True,
+    "sniper_live_enabled": False,
+    "sniper_margin_f": 1.5,
+    "sniper_min_edge_cents": 5,
+    "sniper_max_open": 20,
     # Risk layer. kill_switch blocks all new entries (paper + live) and
     # cancels working live entries; exits stay allowed. Loss limits are
     # realized live P&L in trailing 1d/7d windows; a breach reverts to paper

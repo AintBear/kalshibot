@@ -339,6 +339,7 @@ def auto_enter_qualifying_alerts(settings_override: Optional[dict] = None) -> di
                 entry_price=entry_price,
                 alert_id=alert_id,
                 contracts=contracts,
+                fill_context=rec,
                 **recommendation_exit_args(rec, stop_loss_pct, take_profit_pct),
             )
 
@@ -511,6 +512,7 @@ def _run_explore_pass(
                 entry_price=cand["entry_price"],
                 alert_id=alert_id,
                 contracts=1,
+                fill_context=rec,
                 **recommendation_exit_args(rec, stop_loss_pct, take_profit_pct),
             )
             _mark_alert_traded(alert_id, True, "explore")

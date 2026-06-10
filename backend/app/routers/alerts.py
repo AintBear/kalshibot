@@ -647,6 +647,7 @@ def paper_trade_alert(alert_id: int, payload: Optional[dict] = Body(default=None
         entry_price=_paper_entry_yes_price(alert, details, recommendation),
         alert_id=alert_id,
         contracts=contracts,
+        fill_context=recommendation,
         **recommendation_exit_args(
             recommendation,
             float(stop_loss_pct),

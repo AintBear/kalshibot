@@ -158,6 +158,14 @@ def _startup_job():
         logger.info("Startup: slice calibration rebuild: %s", slice_result)
     except Exception as e:
         logger.error("Startup slice calibration error: %s", e)
+    try:
+        from app.services.forecast_skill import rebuild_city_skill, backfill_forecast_actuals
+        skill_result = rebuild_city_skill()
+        snap_result = backfill_forecast_actuals()
+        logger.info("Startup: city forecast skill rebuild: %s; snapshot backfill: %s",
+                    skill_result, snap_result)
+    except Exception as e:
+        logger.error("Startup forecast skill error: %s", e)
     _learning_refresh_job()
     _auto_entry_job()
     if not _automation_enabled():
@@ -233,6 +241,12 @@ def _learning_refresh_job():
             slice_cal_result = update_model_calibration()
         except Exception as slice_exc:
             logger.warning("Slice calibration rebuild failed: %s", slice_exc)
+        try:
+            from app.services.forecast_skill import rebuild_city_skill, backfill_forecast_actuals
+            rebuild_city_skill()
+            backfill_forecast_actuals()
+        except Exception as skill_exc:
+            logger.warning("Forecast skill rebuild failed: %s", skill_exc)
         logger.info(
             "Learning refresh complete: backfill=%s cross_ref=%s rebuilt_segments=%d isotonic=%s slice=%s",
             backfill_result,
@@ -303,6 +317,18 @@ def _order_monitor_job():
         exits = check_live_trade_exits()
         if exits.get("exits_submitted"):
             logger.info("Live risk exits submitted: %s", exits)
+        # Settlement sniper: catch already-decided-but-mispriced markets
+        # between scans. Every 2nd tick (~2 min) — obs are cached 10 min.
+        if _ORDER_MONITOR_TICKS % 2 == 0:
+            try:
+                from app.services.settlement_sniper import run_sniper_scan
+                snipe = run_sniper_scan()
+                if snipe.get("entered"):
+                    logger.info("Sniper entered %d decided markets: %s",
+                                snipe["entered"],
+                                [o["ticker"] for o in snipe.get("opportunities", [])])
+            except Exception as snipe_exc:
+                logger.error("Sniper scan error: %s", snipe_exc)
         # Reconcile DB vs Kalshi truth every 15th tick (~15 min), live only.
         if _ORDER_MONITOR_TICKS % 15 == 0:
             recon = reconcile_with_kalshi()
