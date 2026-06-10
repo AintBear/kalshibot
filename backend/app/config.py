@@ -59,6 +59,13 @@ _defaults = {
     # live_cross_minutes_to_close the order crosses the spread (a passive
     # order that dies unfilled at close has negative expected value vs the
     # measured <=12h entry edge).
+    # Shadow-live: when paper_trading=false, the FULL live engine runs
+    # (pre-trade checks, work-the-bid, requotes, exits, reconciliation paths)
+    # but orders are logged as SHADOW-* instead of being submitted to Kalshi;
+    # fills are simulated when the market trades through our price. Real
+    # money requires BOTH paper_trading=false AND live_shadow_mode=false —
+    # defense in depth so flipping live lands in shadow first.
+    "live_shadow_mode": True,
     "live_requote_enabled": True,
     "live_max_chase_cents": 3,
     "live_cross_minutes_to_close": 45,

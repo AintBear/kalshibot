@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sqlite3
 import tempfile
 import unittest
@@ -112,6 +112,7 @@ class TestLiveExitFlow(_DbCase):
         quote = {"yes_bid": 0.24, "yes_ask": 0.28, "yes_mid": 0.26}
 
         with mock.patch("app.services.order_manager._current_quote", return_value=quote), \
+             mock.patch("app.services.order_manager._shadow_mode", return_value=False), \
              mock.patch("app.services.order_manager._submit_to_kalshi", return_value="K123") as sub:
             from app.services.order_manager import submit_live_exit
             result = submit_live_exit(tid, "take_profit", cross=False)
@@ -138,6 +139,7 @@ class TestLiveExitFlow(_DbCase):
         tid = self._open_live_trade()
         quote = {"yes_bid": 0.24, "yes_ask": 0.28}
         with mock.patch("app.services.order_manager._current_quote", return_value=quote), \
+             mock.patch("app.services.order_manager._shadow_mode", return_value=False), \
              mock.patch("app.services.order_manager._submit_to_kalshi", return_value="K123"):
             from app.services.order_manager import submit_live_exit
             first = submit_live_exit(tid, "stop_loss", cross=True)
@@ -149,6 +151,7 @@ class TestLiveExitFlow(_DbCase):
         tid = self._open_live_trade()
         quote = {"yes_bid": 0.40, "yes_ask": 0.44}
         with mock.patch("app.services.order_manager._current_quote", return_value=quote), \
+             mock.patch("app.services.order_manager._shadow_mode", return_value=False), \
              mock.patch("app.services.order_manager._submit_to_kalshi", return_value="K9"):
             from app.services.order_manager import submit_live_exit
             result = submit_live_exit(tid, "stop_loss", cross=True)
@@ -159,6 +162,7 @@ class TestLiveExitFlow(_DbCase):
         tid = self._open_live_trade(stop_loss_price=0.40)  # NO trade: stop when yes >= 0.40
         quote = {"yes_bid": 0.45, "yes_ask": 0.49}
         with mock.patch("app.services.order_manager._current_quote", return_value=quote), \
+             mock.patch("app.services.order_manager._shadow_mode", return_value=False), \
              mock.patch("app.services.order_manager._submit_to_kalshi", return_value="K77") as sub:
             from app.services.trade_lifecycle import check_live_trade_exits
             result = check_live_trade_exits()
@@ -249,7 +253,7 @@ class TestManageWorkingOrders(_DbCase):
         tid = self._working_entry(price_yes=0.30)  # NO side resting at 0.70
         # Market moved: yes 0.27/0.29 -> NO side bid 0.71, ask 0.73. We're outbid.
         quote = {"yes_bid": 0.27, "yes_ask": 0.29}
-        settings = {"paper_trading": False, "kalshi_key_id": "k",
+        settings = {"paper_trading": False, "live_shadow_mode": False, "kalshi_key_id": "k",
                     "kalshi_private_key_path": "p", "live_max_chase_cents": 3,
                     "live_cross_minutes_to_close": 45, "live_max_requotes_per_order": 10}
 
@@ -282,7 +286,7 @@ class TestManageWorkingOrders(_DbCase):
     def test_crosses_near_close(self):
         self._working_entry(price_yes=0.30)
         quote = {"yes_bid": 0.27, "yes_ask": 0.29}  # NO ask = 0.73, within 3c chase of 0.70
-        settings = {"paper_trading": False, "kalshi_key_id": "k",
+        settings = {"paper_trading": False, "live_shadow_mode": False, "kalshi_key_id": "k",
                     "kalshi_private_key_path": "p", "live_max_chase_cents": 3,
                     "live_cross_minutes_to_close": 45, "live_max_requotes_per_order": 10}
         with mock.patch("app.services.order_manager._get_settings", return_value=settings), \
@@ -299,7 +303,7 @@ class TestManageWorkingOrders(_DbCase):
     def test_abandons_when_market_runs_away_near_close(self):
         tid = self._working_entry(price_yes=0.30)
         quote = {"yes_bid": 0.20, "yes_ask": 0.22}  # NO ask 0.80 > chase cap 0.73
-        settings = {"paper_trading": False, "kalshi_key_id": "k",
+        settings = {"paper_trading": False, "live_shadow_mode": False, "kalshi_key_id": "k",
                     "kalshi_private_key_path": "p", "live_max_chase_cents": 3,
                     "live_cross_minutes_to_close": 45, "live_max_requotes_per_order": 10}
         with mock.patch("app.services.order_manager._get_settings", return_value=settings), \
@@ -334,7 +338,9 @@ class TestReconcile(_DbCase):
                 # Kalshi says we hold 1 NO contract (position=-1); DB says 3.
                 return {"market_positions": [{"ticker": "KXHIGHNY-26JUN10-B81.5", "position": -1}]}
 
-        with mock.patch("app.services.kalshi_client.kalshi_request", return_value=FakeResponse()):
+        with mock.patch("app.services.kalshi_client.kalshi_request", return_value=FakeResponse()), \
+             mock.patch("app.services.order_manager._get_settings",
+                        return_value={"live_shadow_mode": False}):
             from app.services.order_manager import reconcile_with_kalshi
             result = reconcile_with_kalshi()
 
@@ -362,7 +368,9 @@ class TestReconcile(_DbCase):
             def json(self):
                 return {"market_positions": [{"ticker": "KXHIGHNY-26JUN10-B81.5", "position": -3}]}
 
-        with mock.patch("app.services.kalshi_client.kalshi_request", return_value=FakeResponse()):
+        with mock.patch("app.services.kalshi_client.kalshi_request", return_value=FakeResponse()), \
+             mock.patch("app.services.order_manager._get_settings",
+                        return_value={"live_shadow_mode": False}):
             from app.services.order_manager import reconcile_with_kalshi
             result = reconcile_with_kalshi()
         self.assertEqual(result["mismatches"], [])

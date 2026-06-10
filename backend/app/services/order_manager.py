@@ -166,7 +166,7 @@ def _live_place(
 
     client_order_id = make_client_order_id(trade_id, "entry", 0)
     try:
-        kalshi_order_id = _submit_to_kalshi(
+        kalshi_order_id = _submit_or_shadow(
             market_ticker, direction, entry_price, contracts, client_order_id=client_order_id
         )
     except Exception:
@@ -283,6 +283,40 @@ def make_client_order_id(trade_id: int, purpose: str, seq: int) -> str:
     return f"sib-{int(trade_id)}-{purpose}-{int(seq)}"
 
 
+SHADOW_PREFIX = "SHADOW-"
+
+
+def _shadow_mode(settings: Optional[dict] = None) -> bool:
+    settings = settings or _get_settings()
+    return bool(settings.get("live_shadow_mode", True))
+
+
+def _submit_or_shadow(
+    ticker: str,
+    direction: str,
+    price: float,
+    contracts: int,
+    client_order_id: str,
+    action: str = "buy",
+) -> str:
+    """Submit to Kalshi, or log a shadow order when live_shadow_mode is on.
+
+    Shadow runs the identical engine (pre-trade checks, requotes, exits,
+    monitors) with zero real orders — the validation bridge before money.
+    """
+    if _shadow_mode():
+        from app.services.audit import audit
+        kalshi_order_id = SHADOW_PREFIX + client_order_id
+        audit("shadow_order_logged", ticker=ticker, direction=direction,
+              order_action=action, price=price, contracts=contracts,
+              kalshi_order_id=kalshi_order_id)
+        logger.info("SHADOW order (not submitted): %s %s %s @ %.4f x%d",
+                    action, direction, ticker, price, contracts)
+        return kalshi_order_id
+    return _submit_to_kalshi(ticker, direction, price, contracts,
+                             client_order_id=client_order_id, action=action)
+
+
 def _submit_to_kalshi(
     ticker: str,
     direction: str,
@@ -347,7 +381,7 @@ def monitor_live_orders() -> dict:
     conn = _get_conn()
     pending = conn.execute(
         """SELECT orders.id AS order_id, orders.kalshi_order_id, orders.trade_id,
-                  orders.purpose, orders.exit_reason,
+                  orders.purpose, orders.exit_reason, orders.market_ticker,
                   trades.entry_price, trades.direction, trades.contracts
              FROM orders
              JOIN trades ON trades.id = orders.trade_id
@@ -366,6 +400,13 @@ def monitor_live_orders() -> dict:
     for row in pending:
         checked += 1
         kid = row["kalshi_order_id"]
+        if str(kid or "").startswith(SHADOW_PREFIX):
+            try:
+                if _simulate_shadow_fill(row):
+                    filled += 1
+            except Exception as exc:
+                logger.warning("Shadow fill simulation error for %s: %s", kid, exc)
+            continue
         path = f"/portfolio/orders/{kid}"
         try:
             r = kalshi_request("GET", path, settings=settings, signed=True, timeout=10)
@@ -430,6 +471,59 @@ def monitor_live_orders() -> dict:
     return {"checked": checked, "filled": filled}
 
 
+def _simulate_shadow_fill(row) -> bool:
+    """Maker-fill simulation for shadow orders: fill when the market trades
+    through our resting price (opposite touch reaches it). Conservative — no
+    queue-position modeling, so shadow fills are slightly optimistic; that
+    bias is measurable later against real pilot fills."""
+    from app.services.audit import audit
+
+    ticker = row["market_ticker"]
+    direction = (row["direction"] or "yes").lower()
+    purpose = (row["purpose"] or "entry").lower()
+    quote = _current_quote(ticker)
+    if not quote:
+        return False
+    side_bid, side_ask = _side_quote(quote, direction)
+    if side_bid is None or side_ask is None:
+        return False
+
+    resting_yes = float(row["entry_price"]) if purpose == "entry" else None
+    conn = _get_conn()
+    try:
+        order_row = conn.execute("SELECT price FROM orders WHERE id=?", (row["order_id"],)).fetchone()
+    finally:
+        conn.close()
+    order_yes = float(order_row["price"]) if order_row and order_row["price"] is not None else resting_yes
+    if order_yes is None:
+        return False
+    order_side = round(1.0 - order_yes, 4) if direction == "no" else order_yes
+
+    if purpose == "entry":
+        # Buying the side at order_side: fills when sellers come down to us.
+        filled_now = side_ask <= order_side
+    else:
+        # Selling the side at order_side: fills when buyers come up to us.
+        filled_now = side_bid >= order_side
+
+    if not filled_now:
+        return False
+
+    conn = _get_conn()
+    conn.execute("UPDATE orders SET status='filled', updated_at=datetime('now') WHERE id=?",
+                 (row["order_id"],))
+    conn.commit()
+    conn.close()
+    if purpose == "exit":
+        close_order(row["trade_id"], order_yes, row["exit_reason"] or "live_exit")
+        audit("shadow_exit_filled", ticker=ticker, trade_id=row["trade_id"],
+              order_id=row["order_id"], exit_price_yes=order_yes)
+    else:
+        audit("shadow_entry_filled", ticker=ticker, trade_id=row["trade_id"],
+              order_id=row["order_id"], fill_price_yes=order_yes)
+    return True
+
+
 def _filled_count(order: dict) -> int:
     for key in ("count_filled", "fill_count", "fill_count_fp"):
         value = order.get(key)
@@ -480,6 +574,9 @@ def _directional_clv(direction: str, entry_price: float, exit_price: float) -> f
 
 def cancel_kalshi_order(kalshi_order_id: str, settings: Optional[dict] = None) -> bool:
     from app.services.kalshi_client import kalshi_request
+
+    if str(kalshi_order_id or "").startswith(SHADOW_PREFIX):
+        return True  # nothing resting at Kalshi for shadow orders
 
     settings = settings or _get_settings()
     r = kalshi_request("DELETE", f"/portfolio/orders/{kalshi_order_id}",
@@ -678,7 +775,7 @@ def manage_working_orders() -> dict:
         seq = int(order["requote_count"] or 0) + 1
         client_order_id = make_client_order_id(order["trade_id"], "entry", seq)
         try:
-            kalshi_order_id = _submit_to_kalshi(
+            kalshi_order_id = _submit_or_shadow(
                 ticker, direction, new_yes_price, int(order["contracts"] or 1),
                 client_order_id=client_order_id,
             )
@@ -774,7 +871,7 @@ def submit_live_exit(trade_id: int, exit_reason: str, cross: bool = False) -> di
     yes_price = round(1.0 - side_price, 4) if direction == "no" else round(side_price, 4)
 
     client_order_id = make_client_order_id(trade_id, "exit", 0)
-    kalshi_order_id = _submit_to_kalshi(
+    kalshi_order_id = _submit_or_shadow(
         trade["market_ticker"], direction, yes_price, int(trade["contracts"] or 1),
         client_order_id=client_order_id, action="sell",
     )
@@ -808,6 +905,10 @@ def reconcile_with_kalshi() -> dict:
     from app.services.audit import audit
 
     settings = _get_settings()
+    if _shadow_mode(settings):
+        # Shadow positions exist only in our DB by design — comparing them
+        # against the real Kalshi portfolio would just generate noise.
+        return {"skipped": True, "reason": "shadow mode"}
     conn = _get_conn()
     db_positions = conn.execute(
         """SELECT market_ticker, direction, SUM(contracts) AS contracts
